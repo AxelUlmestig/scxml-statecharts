@@ -12,7 +12,10 @@ import Statechart.Model (Chart, StateId)
 data Def s ev = Def
   { defChart         :: Chart
   , defEventName     :: ev -> Text
-  , defEventFromName :: Text -> ev
+  , defEventFromName :: Text -> Maybe ev
+    -- ^ total: 'Nothing' means the generated event type has no constructor
+    -- for that name, which the generator makes impossible for names the
+    -- interpreter can produce
   , defToConfig      :: s -> Set StateId
     -- ^ the set of active state ids described by a typed state
   , defFromConfig    :: Set StateId -> Maybe s

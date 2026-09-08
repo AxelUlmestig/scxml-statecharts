@@ -14,6 +14,10 @@
 -- * @data FsmEvent@: one constructor per event name, verbatim, plus @DoneX@
 --   for SCXML's automatic @done.state.X@ completion events.
 -- * @fsmChart :: Def FsmState FsmEvent@, for "Statechart.Run".
+-- * @serializeStateMachine :: FsmState -> [Text]@ and
+--   @deserializeStateMachine :: [Text] -> Maybe FsmState@, which store a state
+--   as the set of active state ids and read it back, rejecting anything that
+--   is not a configuration of this chart.
 -- * @initiateStateMachine@ and @notifyStateMachine@, which run the chart
 --   calling the callbacks named in @<script>@ elements. Callbacks are looked
 --   up by name in the module containing the quasiquote (they may be defined
@@ -79,6 +83,8 @@ generate src = do
       defName = mkName "fsmChart"
       startName = mkName "initiateStateMachine"
       stepName = mkName "notifyStateMachine"
+      toIdsName = mkName "serializeStateMachine"
+      fromIdsName = mkName "deserializeStateMachine"
       -- A compound state's type has the same name as its constructor; Haskell
       -- keeps types and constructors in separate namespaces.
       nameFor sid = mkName (T.unpack sid)
@@ -134,8 +140,8 @@ generate src = do
         t <- newName "t"
         lam1E (varP t) $
           foldr
-            (\((c, _), e) rest -> [| if $(varE t) == $(lift e) then $(conE c) else $rest |])
-            [| error ("eventFromName: unknown event " ++ T.unpack $(varE t)) |]
+            (\((c, _), e) rest -> [| if $(varE t) == $(lift e) then Just $(conE c) else $rest |])
+            [| Nothing |]
             (zip eventCons events)
 
   defSig <- sigD defName [t| Def $(conT stateT) $(conT eventT) |]
@@ -178,7 +184,30 @@ generate src = do
     ev <- newName "ev"
     funD stepName [clause [varP st, varP ev] (normalB [| Run.stepOrStay $(varE defName) $hooksE $(varE st) $(varE ev) |]) []]
 
-  pure (stateDecs ++ [eventDec, defSig, defDec, startDec, stepDec])
+  -- Storing a state outside Haskell, as the set of active state ids. Generated
+  -- rather than exported so that a chart needs no imports beyond the
+  -- quasiquoter itself.
+  let toCfg = varE (gTo rootGroup)
+      fromCfg = varE (gFrom rootGroup)
+  toIdsSig <- sigD toIdsName [t| $(conT stateT) -> [Text] |]
+  toIdsDec <- do
+    x <- newName "st"
+    funD toIdsName [clause [varP x] (normalB [| Set.toAscList ($toCfg $(varE x)) |]) []]
+  fromIdsSig <- sigD fromIdsName [t| [Text] -> Maybe $(conT stateT) |]
+  fromIdsDec <- do
+    ids <- newName "ids"
+    given <- newName "given"
+    st <- newName "st"
+    let body =
+          [| let $(varP given) = Set.fromList $(varE ids)
+              in case $fromCfg $(varE given) of
+                   -- Round-trip so that a set which merely starts like a valid
+                   -- one, or is missing part of a configuration, is rejected.
+                   Just $(varP st) | $toCfg $(varE st) == $(varE given) -> Just $(varE st)
+                   _ -> Nothing |]
+    funD fromIdsName [clause [varP ids] (normalB body) []]
+
+  pure (stateDecs ++ [eventDec, defSig, defDec, startDec, stepDec, toIdsSig, toIdsDec, fromIdsSig, fromIdsDec])
 
 -- | Data type plus configuration conversions for one compound-like node.
 groupDecs :: Chart -> (StateId -> Name) -> (StateId -> Q Group) -> Group -> Q [Dec]

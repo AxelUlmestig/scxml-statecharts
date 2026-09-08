@@ -16,6 +16,9 @@ First release.
   `<parallel>`. `initial` is required on every compound state and must name a
   direct child; SCXML's "first child in document order" default is not
   supported.
+- The public API is the `scxml` quasiquoter alone. `serializeStateMachine` and
+  `deserializeStateMachine` are generated into the calling module, so a chart
+  needs no other import. The remaining modules are not exposed.
 - Transitions are a map from event name to target, so two transitions on one
   state for the same event are unrepresentable, and document order never
   decides which transition is taken. A transition naming more than one target

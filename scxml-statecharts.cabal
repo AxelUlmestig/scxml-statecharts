@@ -60,6 +60,9 @@ library
     hs-source-dirs:   src
     exposed-modules:
         Statechart
+    -- Reachable from generated code, which refers to them by names Template
+    -- Haskell resolved at compile time, so they need not be exposed.
+    other-modules:
         Statechart.Def
         Statechart.Interpret
         Statechart.Model

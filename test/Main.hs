@@ -9,7 +9,8 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import System.Exit (exitFailure)
 
-import Statechart
+-- The library's entire public API.
+import Statechart (scxml)
 
 -- An order process: compound states, a parallel state that completes via
 -- SCXML's automatic done.state event, a choice state whose entry callback
@@ -80,8 +81,9 @@ import Statechart
 --   data FsmEvent   = Submit | Discard | Abandon | Valid | Invalid | Poll
 --                   | PaymentAuthorized | Packed | Paid | PaymentDeclined
 --                   | DoneFulfilment | Cancel | DoneShipping | DoneInvoicing
---   fsmChart :: Def FsmState FsmEvent
 --   initiateStateMachine, notifyStateMachine   -- signatures below are ours
+--   serializeStateMachine   :: FsmState -> [Text]
+--   deserializeStateMachine :: [Text] -> Maybe FsmState
 
 -- | The "datamodel": whatever the callbacks need lives in the monad.
 data Shop = Shop
@@ -137,6 +139,10 @@ say t = modify' (\s -> s {log_ = log_ s ++ [t]})
 
 tshow :: Show a => a -> Text
 tshow = T.pack . show
+
+-- | Deliver one event from a given state, discarding the datamodel.
+stepFrom :: Shop -> FsmState -> FsmEvent -> IO FsmState
+stepFrom shop s e = fst <$> runStateT (notifyStateMachine s e) shop
 
 -- | Start the chart and feed events. Returns the final state and the datamodel.
 runEvents :: Shop -> [FsmEvent] -> IO (FsmState, Shop)
@@ -230,39 +236,41 @@ main = do
   (end6, _) <- runEvents (shopWith ["book"]) [Submit, PaymentAuthorized, Packed]
   check "one region done" (Processing (Fulfilment Shipped Unpaid)) end6
 
-  -- The pure structure: no callbacks, so Validating is not left.
-  check "stepPure" (Just Validating) (stepPure fsmChart Draft Submit)
-  check "stepPure done event" (Just Completed)
-    (stepPure fsmChart (Processing (Fulfilment Shipped Unpaid)) Paid)
-  check "stepPure unhandled" Nothing (stepPure fsmChart Draft Paid)
-  check "self-transition stays put" (Just (Processing Authorizing))
-    (stepPure fsmChart (Processing Authorizing) Poll)
-  check "initialState" Draft (initialState fsmChart)
-  check "chart name is kept as metadata" (Just "order-v1") (chartName (defChart fsmChart))
+  -- Behaviour reachable only through the generated functions, since the
+  -- library exports nothing but the quasiquoter.
+  (started, _) <- runStateT initiateStateMachine (shopWith ["book"])
+  check "the chart starts in its initial state" Draft started
+  doneFired <- stepFrom (shopWith ["book"]) (Processing (Fulfilment Shipped Unpaid)) Paid
+  check "the last region completing fires the done event" Completed doneFired
+  ignored <- stepFrom (shopWith ["book"]) Draft Paid
+  check "an event with no transition here leaves the state alone" Draft ignored
+  stayed <- stepFrom (shopWith ["book"]) (Processing Authorizing) Poll
+  check "a self-transition re-enters without moving" (Processing Authorizing) stayed
+  viaDiscard <- stepFrom (shopWith ["book"]) Draft Discard
+  viaAbandon <- stepFrom (shopWith ["book"]) Draft Abandon
+  check "several events on one transition all reach its target"
+    (Cancelled, Cancelled) (viaDiscard, viaAbandon)
   check "all events, in document order"
     [ Submit, Discard, Abandon, Valid, Invalid, Poll, PaymentAuthorized, Packed
     , Paid, PaymentDeclined, DoneFulfilment, Cancel, DoneShipping, DoneInvoicing ]
     [minBound .. maxBound :: FsmEvent]
-  check "several events on one transition all reach its target"
-    (Just Cancelled, Just Cancelled)
-    (stepPure fsmChart Draft Discard, stepPure fsmChart Draft Abandon)
 
   -- Serialization. Show/Read round-trips exactly; the id list is the portable
   -- form, and rejects anything that is not a configuration of this chart.
   let deep = Processing (Fulfilment Shipped Unpaid)
   check "Read round-trips" deep (read (show deep))
   check "state ids" ["Fulfilment", "Invoicing", "Processing", "Shipped", "Shipping", "Unpaid"]
-    (toStateIds fsmChart deep)
-  check "id round-trip, nested" (Just deep) (fromStateIds fsmChart (toStateIds fsmChart deep))
-  check "id round-trip, atomic" (Just Draft) (fromStateIds fsmChart (toStateIds fsmChart Draft))
+    (serializeStateMachine deep)
+  check "id round-trip, nested" (Just deep) (deserializeStateMachine (serializeStateMachine deep))
+  check "id round-trip, atomic" (Just Draft) (deserializeStateMachine (serializeStateMachine Draft))
   check "id order and duplicates do not matter" (Just deep)
-    (fromStateIds fsmChart (reverse (toStateIds fsmChart deep) ++ ["Processing"]))
+    (deserializeStateMachine (reverse (serializeStateMachine deep) ++ ["Processing"]))
   check "an id list that merely starts valid is rejected" Nothing
-    (fromStateIds fsmChart ["Draft", "Processing"])
+    (deserializeStateMachine ["Draft", "Processing"])
   check "an incomplete configuration is rejected" Nothing
-    (fromStateIds fsmChart ["Processing"])
-  check "an unknown id is rejected" Nothing (fromStateIds fsmChart ["Archived"])
-  check "an empty list is rejected" Nothing (fromStateIds fsmChart [])
+    (deserializeStateMachine ["Processing"])
+  check "an unknown id is rejected" Nothing (deserializeStateMachine ["Archived"])
+  check "an empty list is rejected" Nothing (deserializeStateMachine [])
 
   n <- readIORef failures
   when (n > 0) exitFailure

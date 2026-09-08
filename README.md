@@ -71,7 +71,6 @@ data Shipping   = Packing | Shipped
 data Invoicing  = Unpaid | Settled
 data FsmEvent   = Submit | Valid | Invalid | Poll | PaymentAuthorized | Packed | Paid
                 | DoneFulfilment | Cancel | DoneShipping | DoneInvoicing
-fsmChart :: Def FsmState FsmEvent
 initiateStateMachine   -- enter the initial state, running its entry callbacks
 notifyStateMachine     -- deliver one event
 ```
@@ -247,13 +246,13 @@ This is how a parallel state completes; `done.state.Fulfilment` above.
 Every generated type derives `Show`, `Read`, `Eq` and `Ord`, so `Show`/`Read`
 round-trip exactly and are convenient in tests. For a state that outlives the
 process, such as one parked in a database between AWS Lambda invocations, use
-the state-id list instead:
+the two generated functions instead:
 
 ```haskell
-toStateIds   :: Def s ev -> s -> [StateId]
-fromStateIds :: Eq s => Def s ev -> [StateId] -> Maybe s
+serializeStateMachine   :: FsmState -> [Text]
+deserializeStateMachine :: [Text] -> Maybe FsmState
 
-toStateIds fsmChart (Processing (Fulfilment Shipped Unpaid))
+serializeStateMachine (Processing (Fulfilment Shipped Unpaid))
   == ["Fulfilment","Invoicing","Processing","Shipped","Shipping","Unpaid"]
 ```
 
@@ -268,15 +267,15 @@ the SCXML does not change it: the Haskell field order flips, so
 serialize to the same array and each chart loads the other's output. Positional
 formats such as `Show` do not survive that edit.
 
-Two things not to persist: `Ord` comparisons on states, and `fromEnum` on
-events. Both are positional, so adding a state or an event changes them.
-
-`fromStateIds` returns `Maybe` and validates by round-tripping, so an
+Deserializing returns `Maybe` and validates by round-tripping, so an
 incomplete set, an unknown id, or a list that merely starts like a valid
 configuration are all rejected rather than decoded into some other state.
 That matters when a chart is redeployed while states are in flight: a value
 stored under the old chart fails loudly, and you migrate it deliberately
 instead of discovering later that it silently changed meaning.
+
+Two things not to persist: `Ord` comparisons on states, and `fromEnum` on
+events. Both are positional, so adding a state or an event changes them.
 
 JSON is two lines in your own module, so the library does not depend on
 `aeson`:

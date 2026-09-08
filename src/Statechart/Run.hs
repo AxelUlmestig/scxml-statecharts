@@ -4,19 +4,12 @@
 module Statechart.Run
   ( Hooks (..)
   , Phase (..)
-  , noActions
   , entryAction
   , exitAction
-  , initialState
-  , toStateIds
-  , fromStateIds
   , start
-  , step
   , stepOrStay
-  , stepPure
   ) where
 
-import Data.Functor.Identity (Identity (..))
 import Data.Maybe (fromMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -35,12 +28,8 @@ newtype Hooks m s ev = Hooks
     -- being processed ('Nothing' during 'start'); returns an event to raise
   }
 
--- | Hooks that run nothing and raise nothing.
-noActions :: Applicative m => Hooks m s ev
-noActions = Hooks (\_ _ _ _ -> pure Nothing)
-
 -- | Marks an entry callback, which returns the event it raises, if any.
--- Raised events are queued and processed before the current 'step' returns,
+-- Raised events are queued and processed before the current step returns,
 -- like SCXML's @<raise>@. Only here so that a callback with the wrong type
 -- gets an error pointing at it.
 entryAction :: m (Maybe ev) -> m (Maybe ev)
@@ -54,7 +43,16 @@ exitAction = id
 toInterp :: Monad m => Def s ev -> Hooks m s ev -> I.Hooks m
 toInterp def h =
   I.Hooks $ \phase name cfg ev ->
-    fmap (defEventName def) <$> runAction h phase name (unsafeFromConfig def cfg) (defEventFromName def <$> ev)
+    fmap (defEventName def) <$> runAction h phase name (unsafeFromConfig def cfg) (typedEvent def <$> ev)
+
+-- | The generator emits a constructor for every event name the interpreter can
+-- produce, including a @done.state@ event for every state that can complete,
+-- so this cannot fail for a chart the quasiquoter built.
+typedEvent :: Def s ev -> Text -> ev
+typedEvent def t =
+  fromMaybe
+    (error ("Statechart: no constructor for the event " ++ show (T.unpack t) ++ "; this is a bug in scxml-statecharts"))
+    (defEventFromName def t)
 
 unsafeFromConfig :: Def s ev -> Set.Set StateId -> s
 unsafeFromConfig def cfg =
@@ -62,53 +60,13 @@ unsafeFromConfig def cfg =
     (error ("Statechart: interpreter produced an invalid configuration: " ++ show (map T.unpack (Set.toList cfg))))
     (defFromConfig def cfg)
 
--- | The active state ids, ascending: the representation to store outside
--- Haskell. It is SCXML's own notion of a chart's state, so it is portable to
--- other implementations of the same chart, readable in a log, and queryable
--- as a text array or JSON array in a database.
---
--- @
--- toStateIds fsmChart (Processing (Fulfilment Shipped Unpaid))
---   == ["Fulfilment","Invoicing","Processing","Shipped","Shipping","Unpaid"]
--- @
-toStateIds :: Def s ev -> s -> [StateId]
-toStateIds def = Set.toAscList . defToConfig def
-
--- | Rebuild a state from 'toStateIds'. 'Nothing' means the list is not a
--- configuration of this chart, which is what a value stored before the chart
--- changed looks like: it fails loudly rather than decoding to a different
--- state. Order and duplicates in the input do not matter.
-fromStateIds :: Eq s => Def s ev -> [StateId] -> Maybe s
-fromStateIds def ids = do
-  s <- defFromConfig def given
-  -- Guard against a set that merely starts like a valid one, e.g. an extra id
-  -- alongside a state that already decodes on its own.
-  if defToConfig def s == given then Just s else Nothing
-  where
-    given = Set.fromList ids
-
--- | The initial state, without running callbacks.
-initialState :: Def s ev -> s
-initialState def = unsafeFromConfig def (I.initialConfiguration (defChart def))
-
 -- | Enter the initial state, running entry callbacks and any events they raise.
 start :: Monad m => Def s ev -> Hooks m s ev -> m s
 start def h = unsafeFromConfig def <$> I.start (defChart def) (toInterp def h)
 
--- | Deliver one event. 'Nothing' means no transition was enabled for it in
--- this state.
-step :: Monad m => Def s ev -> Hooks m s ev -> s -> ev -> m (Maybe s)
-step def h s e =
-  fmap (unsafeFromConfig def)
-    <$> I.macrostep (defChart def) (toInterp def h) (defToConfig def s) (defEventName def e)
-
--- | 'step', staying in the current state when the event has no transition.
--- This is SCXML's behaviour for unmatched events and what the generated
--- @xStep@ functions do.
+-- | Deliver one event, staying in the current state when no transition is
+-- enabled for it, which is SCXML's behaviour for an unmatched event.
 stepOrStay :: Monad m => Def s ev -> Hooks m s ev -> s -> ev -> m s
-stepOrStay def h s e = fromMaybe s <$> step def h s e
-
--- | The transition structure alone: no callbacks run, so nothing is raised
--- except automatic done events. Useful for tests and tooling.
-stepPure :: Def s ev -> s -> ev -> Maybe s
-stepPure def s e = runIdentity (step def noActions s e)
+stepOrStay def h s e =
+  maybe s (unsafeFromConfig def)
+    <$> I.macrostep (defChart def) (toInterp def h) (defToConfig def s) (defEventName def e)
