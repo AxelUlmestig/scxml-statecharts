@@ -5,7 +5,6 @@
 module Statechart.Model
   ( StateId
   , Kind (..)
-  , Transition (..)
   , Node (..)
   , Chart (..)
   , nodeChildren
@@ -18,7 +17,6 @@ module Statechart.Model
   , isDescendantOf
   , lcca
   , allNodes
-  , allTransitions
   ) where
 
 import Data.List (find, sortOn)
@@ -64,21 +62,14 @@ isParallel :: Kind -> Bool
 isParallel (Parallel _) = True
 isParallel _ = False
 
--- | One @<transition>@ element.
-data Transition = Transition
-  { trSource   :: StateId
-  , trEvents   :: [Text]     -- ^ event names this transition matches (never empty)
-  , trTargets  :: [StateId]  -- ^ the states entered (never empty)
-  , trOrder    :: Int        -- ^ document order, unique per chart
-  }
-  deriving (Eq, Ord, Show, Lift)
-
 -- | One state, with its place in the hierarchy resolved.
 data Node = Node
   { nodeId          :: StateId
   , nodeKind        :: Kind
   , nodeParent      :: Maybe StateId -- ^ 'Nothing' for children of @<scxml>@
-  , nodeTransitions :: [Transition]  -- ^ document order
+  , nodeTransitions :: Map Text StateId
+    -- ^ event name to the sibling state it enters. At most one transition per
+    -- event, so nothing has to break a tie.
   , nodeOnEntry     :: [Text]        -- ^ names of @<onentry><script>@ actions
   , nodeOnExit      :: [Text]        -- ^ names of @<onexit><script>@ actions
   , nodeOrder       :: Int           -- ^ pre-order index in the document
@@ -92,6 +83,7 @@ data Chart = Chart
   { chartName         :: Maybe Text
   , chartRootChildren :: [StateId]
   , chartInitial      :: StateId     -- ^ the child of @<scxml>@ entered first
+  , chartEvents       :: [Text]      -- ^ every event named by a transition, in document order
   , chartNodes        :: Map StateId Node
   }
   deriving (Eq, Show, Lift)
@@ -137,7 +129,3 @@ lcca ch (s : rest) =
 -- | All nodes in document order.
 allNodes :: Chart -> [Node]
 allNodes = sortOn nodeOrder . Map.elems . chartNodes
-
--- | All transitions in document order.
-allTransitions :: Chart -> [Transition]
-allTransitions = sortOn trOrder . concatMap nodeTransitions . allNodes

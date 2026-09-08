@@ -91,7 +91,7 @@ generate src = do
 
   -- Events: those named in transitions, in document order, then done events of
   -- states that can complete but that no transition mentions.
-  let referenced = nub (concatMap trEvents (allTransitions ch))
+  let referenced = chartEvents ch
       doneEvents = [I.doneEventName (nodeId n) | n <- allNodes ch, I.canComplete ch (nodeId n)]
       events = referenced ++ filter (`notElem` referenced) doneEvents
       eventCon e = case T.stripPrefix (T.pack "done.state.") e of

@@ -22,6 +22,7 @@ module Statechart.Interpret
 
 import Data.List (sortOn)
 import qualified Data.List.NonEmpty as NE
+import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes)
 import Data.Ord (Down (..))
 import Data.Set (Set)
@@ -137,15 +138,26 @@ inFinalState ch cfg s = case kindOf ch s of
 
 -- Transition selection -------------------------------------------------------
 
-selectTransitions :: Chart -> Configuration -> Text -> [Transition]
+-- | A transition the chart is about to take: the state it is declared on, and
+-- the sibling of that state it enters.
+type Taken = (StateId, StateId)
+
+-- | The transitions enabled by an event. For each active atomic state, the
+-- innermost enclosing state with a transition for the event wins. Two atomic
+-- states in different regions can find the same one, hence the deduplication.
+selectTransitions :: Chart -> Configuration -> Text -> [Taken]
 selectTransitions ch cfg ev =
   removeConflicting ch cfg (dedupe (concatMap (take 1 . candidates) atomics))
   where
     atomics = sortOn (orderOf ch) [s | s <- Set.toList cfg, kindOf ch s `elem` [Atomic, Final]]
-    candidates s = [t | anc <- s : properAncestors ch s, t <- nodeTransitions (nodeOf ch anc), ev `elem` trEvents t]
-    dedupe = foldr (\t acc -> if any ((== trOrder t) . trOrder) acc then acc else t : acc) []
+    candidates s =
+      [ (anc, tgt)
+      | anc <- s : properAncestors ch s
+      , Just tgt <- [Map.lookup ev (nodeTransitions (nodeOf ch anc))]
+      ]
+    dedupe = foldr (\t acc -> if any ((== fst t) . fst) acc then acc else t : acc) []
 
-removeConflicting :: Chart -> Configuration -> [Transition] -> [Transition]
+removeConflicting :: Chart -> Configuration -> [Taken] -> [Taken]
 removeConflicting ch cfg = foldl' step []
   where
     conflicts t1 t2 = not (Set.null (Set.intersection (exitSetOf ch cfg t1) (exitSetOf ch cfg t2)))
@@ -153,7 +165,7 @@ removeConflicting ch cfg = foldl' step []
       let go [] toRemove = Just toRemove
           go (t2 : rest) toRemove
             | conflicts t1 t2 =
-                if isDescendantOf ch (trSource t1) (Just (trSource t2))
+                if isDescendantOf ch (fst t1) (Just (fst t2))
                   then go rest (t2 : toRemove)
                   else Nothing
             | otherwise = go rest toRemove
@@ -165,19 +177,17 @@ removeConflicting ch cfg = foldl' step []
 
 -- | The state the transition stays inside, which decides what is exited and
 -- re-entered. 'Nothing' is the chart root.
-transitionDomain :: Chart -> Transition -> Maybe StateId
-transitionDomain ch t = lcca ch (trSource t : trTargets t)
+transitionDomain :: Chart -> Taken -> Maybe StateId
+transitionDomain ch (src, tgt) = lcca ch [src, tgt]
 
-exitSetOf :: Chart -> Configuration -> Transition -> Set StateId
+exitSetOf :: Chart -> Configuration -> Taken -> Set StateId
 exitSetOf ch cfg t = Set.filter (\s -> isDescendantOf ch s (transitionDomain ch t)) cfg
 
-computeEntrySet :: Chart -> [Transition] -> Set StateId
+computeEntrySet :: Chart -> [Taken] -> Set StateId
 computeEntrySet ch = foldl' addTransition Set.empty
   where
-    addTransition acc t =
-      let dom = transitionDomain ch t
-          acc1 = foldl' (addDescendants ch) acc (trTargets t)
-       in foldl' (\a s -> addAncestors ch s dom a) acc1 (trTargets t)
+    addTransition acc t@(_, tgt) =
+      addAncestors ch tgt (transitionDomain ch t) (addDescendants ch acc tgt)
 
 -- | Add a state and everything default entry into it implies.
 addDescendants :: Chart -> Set StateId -> StateId -> Set StateId

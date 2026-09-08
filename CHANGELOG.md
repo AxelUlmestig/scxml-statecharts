@@ -16,6 +16,10 @@ First release.
   `<parallel>`. `initial` is required on every compound state and must name a
   direct child; SCXML's "first child in document order" default is not
   supported.
+- Transitions are a map from event name to target, so two transitions on one
+  state for the same event are unrepresentable, and document order never
+  decides which transition is taken. A transition naming more than one target
+  is rejected; both previously compiled and silently produced a wrong state.
 - `Kind` carries each state's children, so an atomic or final state with
   children, a compound state without an initial child, and a `<parallel>`
   without regions are all unrepresentable rather than merely rejected.

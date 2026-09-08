@@ -21,7 +21,9 @@ import Statechart
 <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" name="order-v1" initial="Draft">
   <state id="Draft">
     <transition event="Submit" target="Validating"/>
-    <transition event="Discard" target="Cancelled"/>
+    <!-- Several event names on one element is shorthand for several
+         transitions with the same target. -->
+    <transition event="Discard Abandon" target="Cancelled"/>
   </state>
 
   <state id="Validating">
@@ -75,9 +77,9 @@ import Statechart
 --   data Processing = Authorizing | Fulfilment Shipping Invoicing
 --   data Shipping   = Packing | Shipped
 --   data Invoicing  = Unpaid | Settled
---   data FsmEvent   = Submit | Discard | Valid | Invalid | Poll | PaymentAuthorized
---                   | Packed | Paid | PaymentDeclined | DoneFulfilment | Cancel
---                   | DoneShipping | DoneInvoicing
+--   data FsmEvent   = Submit | Discard | Abandon | Valid | Invalid | Poll
+--                   | PaymentAuthorized | Packed | Paid | PaymentDeclined
+--                   | DoneFulfilment | Cancel | DoneShipping | DoneInvoicing
 --   fsmChart :: Def FsmState FsmEvent
 --   initiateStateMachine, notifyStateMachine   -- signatures below are ours
 
@@ -237,10 +239,13 @@ main = do
     (stepPure fsmChart (Processing Authorizing) Poll)
   check "initialState" Draft (initialState fsmChart)
   check "chart name is kept as metadata" (Just "order-v1") (chartName (defChart fsmChart))
-  check "all events"
-    [ Submit, Discard, Valid, Invalid, Poll, PaymentAuthorized, Packed, Paid
-    , PaymentDeclined, DoneFulfilment, Cancel, DoneShipping, DoneInvoicing ]
+  check "all events, in document order"
+    [ Submit, Discard, Abandon, Valid, Invalid, Poll, PaymentAuthorized, Packed
+    , Paid, PaymentDeclined, DoneFulfilment, Cancel, DoneShipping, DoneInvoicing ]
     [minBound .. maxBound :: FsmEvent]
+  check "several events on one transition all reach its target"
+    (Just Cancelled, Just Cancelled)
+    (stepPure fsmChart Draft Discard, stepPure fsmChart Draft Abandon)
 
   -- Serialization. Show/Read round-trips exactly; the id list is the portable
   -- form, and rejects anything that is not a configuration of this chart.

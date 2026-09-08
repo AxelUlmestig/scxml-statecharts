@@ -194,6 +194,28 @@ runs. Rejected at compile time, with the position in the XML where available:
   configuration the state type cannot represent. Declare the transition on the
   `<parallel>` itself, or on a state inside the region.
 
+- **Two transitions on one state for the same event.** With `cond` gone there
+  is nothing to choose between them, so this is always a mistake rather than a
+  precedence question:
+
+  ```
+  scxml: <state id="Start">: two transitions for the event "Go" (to First and
+  Second); with no cond there is nothing to choose between them
+  ```
+
+  Transitions are held as a map from event name to target, so this is
+  unrepresentable in the model rather than merely rejected. Order therefore
+  never decides which transition is taken.
+
+- **A transition naming more than one target.** SCXML allows several to enter
+  several parallel regions at once, but that needs the source to be a region
+  too, and regions cannot have transitions. So more than one target is always
+  invalid here.
+
+- **Duplicate state ids**, which SCXML also forbids, since ids are XML IDs and
+  must be unique across the document. The message says which parents the
+  clashing ids sit under.
+
 - **Unknown state ids, event names or callback names**, ids and event names
   that are not Haskell constructor names, transitions with no event or no
   target, duplicate ids, `cond`, `type="internal"`, `done.state.X` naming a
@@ -323,6 +345,7 @@ function reusable outside the chart.
 | compound state          | constructor carrying a sum type of the same name                  |
 | parallel state          | constructor with one field per compound region                    |
 | event name              | constructor of `FsmEvent`                                         |
+| `event="A B"`           | shorthand for two transitions with the same target                |
 | `done.state.X`          | constructor `DoneX`                                               |
 | the active configuration | `toStateIds` / `fromStateIds`, for storage                       |
 | `<script>name</script>` in `<onentry>` | `name :: FsmState -> Maybe FsmEvent -> m (Maybe FsmEvent)` |

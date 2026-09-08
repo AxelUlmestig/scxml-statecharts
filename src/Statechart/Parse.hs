@@ -45,17 +45,21 @@ import Statechart.Model
 import Statechart.Interpret (canComplete)
 
 -- A tiny state+error monad, used to hand out document-order indices.
-newtype P a = P {runP :: Int -> Either String (a, Int)}
+-- A state+error monad handing out document-order indices and collecting
+-- event names in the order they are first seen.
+data S = S {sNext :: Int, sEvents :: [Text]}
+
+newtype P a = P {runP :: S -> Either String (a, S)}
 
 instance Functor P where
-  fmap f (P g) = P $ \n -> fmap (\(a, n') -> (f a, n')) (g n)
+  fmap f (P g) = P $ \st -> fmap (\(a, st') -> (f a, st')) (g st)
 
 instance Applicative P where
-  pure a = P $ \n -> Right (a, n)
+  pure a = P $ \st -> Right (a, st)
   (<*>) = ap
 
 instance Monad P where
-  P g >>= k = P $ \n -> g n >>= \(a, n') -> runP (k a) n'
+  P g >>= k = P $ \st -> g st >>= \(a, st') -> runP (k a) st'
 
 throwP :: String -> P a
 throwP msg = P $ \_ -> Left msg
@@ -64,7 +68,12 @@ liftE :: Either String a -> P a
 liftE = either throwP pure
 
 next :: P Int
-next = P $ \n -> Right (n, n + 1)
+next = P $ \st -> Right (sNext st, st {sNext = sNext st + 1})
+
+-- | Record an event name at its first occurrence in the document.
+seeEvent :: Text -> P ()
+seeEvent e = P $ \st ->
+  Right ((), if e `elem` sEvents st then st else st {sEvents = sEvents st ++ [e]})
 
 -- | Parse and validate an SCXML document. The 'Left' case is a message meant
 -- to be shown to whoever wrote the XML; the quasiquoter reports it as a
@@ -74,17 +83,26 @@ parseScxml src = do
   root <- parseXml src
   unless (localName root == "scxml") $
     Left ("root element must be <scxml>, found <" ++ localName root ++ ">")
-  (nodes, _) <- runP (concat <$> mapM (buildNode Nothing) (stateChildren root)) 0
+  (nodes, finalState) <- runP (concat <$> mapM (buildNode Nothing) (stateChildren root)) (S 0 [])
   let rootChildren = [nodeId n | n <- nodes, isNothing (nodeParent n)]
   when (null rootChildren) $ Left "<scxml> contains no states"
   initial <- initialOf "<scxml>" root rootChildren
-  let dups = [T.unpack d | (d : _ : _) <- group (sort (map nodeId nodes))]
-  unless (null dups) $ Left ("duplicate state ids: " ++ unwords dups)
+  let dups = [d | (d : _ : _) <- group (sort (map nodeId nodes))]
+      whose n = maybe "the chart root" (\p -> "a child of " ++ T.unpack p) (nodeParent n)
+      describe d =
+        show (T.unpack d) ++ " is used by "
+          ++ intercalate " and " [whose n | n <- nodes, nodeId n == d]
+  unless (null dups) $
+    Left $
+      "duplicate state ids: " ++ intercalate "; " (map describe dups)
+        ++ ". State ids must be unique across the whole chart, whatever their parents:"
+        ++ " SCXML ids are XML IDs, and each one becomes a Haskell constructor"
   let ch =
         Chart
           { chartName = T.pack <$> attr "name" root
           , chartRootChildren = rootChildren
           , chartInitial = initial
+          , chartEvents = sEvents finalState
           , chartNodes = Map.fromList [(nodeId n, n) | n <- nodes]
           }
   validate ch
@@ -238,7 +256,8 @@ buildNode parent el = do
     unless (localName c `elem` allowedChildren) $
       throwP (label ++ ": unexpected child element <" ++ localName c ++ ">")
   -- Walk children in textual order so document-order indices are exactly that.
-  (trans, descendants) <- buildChildren label sid el
+  (pairs, descendants) <- buildChildren label sid el
+  trans <- liftE (transitionMap label pairs)
   onEntry <- liftE (concat <$> mapM (scriptsOf (label ++ " <onentry>")) (childrenNamed ["onentry"] el))
   onExit <- liftE (concat <$> mapM (scriptsOf (label ++ " <onexit>")) (childrenNamed ["onexit"] el))
   let children = [nodeId n | n <- descendants, nodeParent n == Just sid]
@@ -269,24 +288,26 @@ buildNode parent el = do
   pure (node : descendants)
 
 -- | Transitions and descendant nodes of an element, numbered in textual order.
-buildChildren :: String -> StateId -> Element -> P ([Transition], [Node])
+buildChildren :: String -> StateId -> Element -> P ([(Text, StateId)], [Node])
 buildChildren label sid el = go (elChildren el)
   where
     go [] = pure ([], [])
     go (c : rest)
       | localName c == "transition" = do
-          t <- buildTransition label sid c
+          t <- buildTransition label c
           (ts, ns) <- go rest
-          pure (t : ts, ns)
+          pure (t ++ ts, ns)
       | localName c `elem` ["state", "parallel", "final", "history"] = do
           ns0 <- buildNode (Just sid) c
           (ts, ns) <- go rest
           pure (ts, ns0 ++ ns)
       | otherwise = go rest
 
-buildTransition :: String -> StateId -> Element -> P Transition
-buildTransition label src el = do
-  order <- next
+-- | The (event, target) pairs one @<transition>@ element contributes. SCXML
+-- allows several event names on one element, which is only shorthand for
+-- several transitions with the same target.
+buildTransition :: String -> Element -> P [(Text, StateId)]
+buildTransition label el = do
   let events = maybe [] words (attr "event" el)
       targets = map T.pack (maybe [] words (attr "target" el))
   when (attr "cond" el /= Nothing) $
@@ -295,27 +316,39 @@ buildTransition label src el = do
     throwP (label ++ ": <script> on a transition is not supported; put it in the <onentry> of the target, which receives the triggering event")
   when (null events) $
     throwP (label ++ ": transition without an event; eventless transitions are not supported, raise an event from a callback instead")
-  when (null targets) $
-    throwP (label ++ ": transition without a target; to act on an event without leaving the state, target the state itself")
-  forM_ events $ \e ->
-    when ('*' `elem` e) $
-      throwP (label ++ ": wildcard event descriptor " ++ show e ++ " is not supported")
-  forM_ events $ \e -> case stripPrefix (T.unpack donePrefix) e of
-    Just inner -> liftE (checkConName (label ++ " done.state event state") inner)
-    Nothing -> liftE (checkConName (label ++ " event") e)
+  target <- case targets of
+    [t] -> pure t
+    [] -> throwP (label ++ ": transition without a target; to act on an event without leaving the state, target the state itself")
+    ts ->
+      throwP $
+        label ++ ": transition names several targets (" ++ unwords (map T.unpack ts)
+          ++ "); a transition enters exactly one state, and entering siblings at once is only meaningful inside a <parallel>, whose regions cannot have transitions"
   case attr "type" el of
     Nothing -> pure ()
     Just "external" -> pure ()
     Just "internal" ->
       throwP (label ++ ": type=\"internal\" is not supported; it can only differ from an external transition for a target inside the source, which is not allowed")
     Just other -> throwP (label ++ ": unknown transition type " ++ show other)
-  pure
-    Transition
-      { trSource = src
-      , trEvents = map T.pack events
-      , trTargets = targets
-      , trOrder = order
-      }
+  forM_ events $ \e ->
+    when ('*' `elem` e) $
+      throwP (label ++ ": wildcard event descriptor " ++ show e ++ " is not supported")
+  forM_ events $ \e -> case stripPrefix (T.unpack donePrefix) e of
+    Just inner -> liftE (checkConName (label ++ " done.state event state") inner)
+    Nothing -> liftE (checkConName (label ++ " event") e)
+  mapM_ (seeEvent . T.pack) events
+  pure [(T.pack e, target) | e <- events]
+
+-- | One transition per event, so selection never has to break a tie.
+transitionMap :: String -> [(Text, StateId)] -> Either String (Map.Map Text StateId)
+transitionMap label pairs = case dups of
+  [] -> Right (Map.fromList pairs)
+  (e : _) ->
+    Left $
+      label ++ ": two transitions for the event " ++ show (T.unpack e) ++ " (to "
+        ++ intercalate " and " [T.unpack t | (e', t) <- pairs, e' == e]
+        ++ "); with no cond there is nothing to choose between them"
+  where
+    dups = [e | (e : _ : _) <- group (sort (map fst pairs))]
 
 validate :: Chart -> Either String ()
 validate ch = do
@@ -323,17 +356,16 @@ validate ch = do
       check what s = unless (known s) $ Left (what ++ " refers to unknown state " ++ show (T.unpack s))
   forM_ (allNodes ch) $ \n -> do
     case nodeParent n >>= \p -> if isParallel (kindOf ch p) then Just p else Nothing of
-      Just p | not (null (nodeTransitions n)) ->
+      Just p | not (Map.null (nodeTransitions n)) ->
         Left $
           T.unpack (nodeId n) ++ " is a region of the <parallel> " ++ T.unpack p
             ++ " and cannot have transitions: its sibling regions are active at the same time, so leaving it would leave them behind."
             ++ " Declare the transition on " ++ T.unpack p ++ " or on a state inside " ++ T.unpack (nodeId n) ++ "."
       _ -> Right ()
-    forM_ (nodeTransitions n) $ \t -> do
-      forM_ (trTargets t) $ \tgt -> do
-        check ("transition from " ++ T.unpack (nodeId n)) tgt
-        checkLevel ch (nodeId n) tgt
-      forM_ (trEvents t) $ \e -> forM_ (T.stripPrefix donePrefix e) $ \target -> do
+    forM_ (Map.toList (nodeTransitions n)) $ \(e, tgt) -> do
+      check ("transition from " ++ T.unpack (nodeId n)) tgt
+      checkLevel ch (nodeId n) tgt
+      forM_ (T.stripPrefix donePrefix e) $ \target -> do
         check ("done.state event in transition from " ++ T.unpack (nodeId n)) target
         unless (canComplete ch target) $
           Left (T.unpack e ++ " can never fire: " ++ T.unpack target ++ " is not a <parallel> or a <state> with a <final> child")
