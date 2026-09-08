@@ -40,6 +40,7 @@ import Control.Monad (forM, unless)
 import Data.Char (isAlphaNum, isLower, isUpper)
 import Data.List (nub)
 import qualified Data.Map.Strict as Map
+import qualified Data.List.NonEmpty as NE
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -70,7 +71,7 @@ scxml =
 -- own data type with helpers converting to and from configurations.
 data Group = Group
   { gType     :: Name
-  , gChildren :: [StateId]
+  , gChildren :: [Node]
   , gTo       :: Name
   , gFrom     :: Name
   }
@@ -78,6 +79,9 @@ data Group = Group
 generate :: String -> Q [Dec]
 generate src = do
   ch <- orFail (parseScxml src)
+  -- Everything here is a walk of the tree: a node carries its own children,
+  -- so nothing needs looking up by id.
+  let states = chartStates ch
   let stateT = mkName "FsmState"
       eventT = mkName "FsmEvent"
       defName = mkName "fsmChart"
@@ -88,17 +92,17 @@ generate src = do
       -- A compound state's type has the same name as its constructor; Haskell
       -- keeps types and constructors in separate namespaces.
       nameFor sid = mkName (T.unpack sid)
-      compounds = [nodeId n | n <- allNodes ch, Compound _ _ <- [nodeKind n]]
+      compounds = [n | n <- states, Compound _ <- [nodeKind n]]
 
   -- Callback names
-  let entryActions = nub (concatMap nodeOnEntry (allNodes ch))
-      exitActions = nub (concatMap nodeOnExit (allNodes ch))
+  let entryActions = nub (concatMap nodeOnEntry states)
+      exitActions = nub (concatMap nodeOnExit states)
   mapM_ (orFail . checkVarName) (nub (entryActions ++ exitActions))
 
   -- Events: those named in transitions, in document order, then done events of
   -- states that can complete but that no transition mentions.
   let referenced = chartEvents ch
-      doneEvents = [I.doneEventName (nodeId n) | n <- allNodes ch, I.canComplete ch (nodeId n)]
+      doneEvents = [I.doneEventName (nodeId n) | n <- states, completes n]
       events = referenced ++ filter (`notElem` referenced) doneEvents
       eventCon e = case T.stripPrefix (T.pack "done.state.") e of
         Just sid -> (mkName ("Done" ++ T.unpack sid), "completion event " ++ show (T.unpack e))
@@ -106,12 +110,12 @@ generate src = do
       eventCons = map eventCon events
 
   groups <- forM (Nothing : map Just compounds) $ \g -> do
-    let ty = maybe stateT nameFor g
+    let ty = maybe stateT (nameFor . nodeId) g
     to <- newName ("toCfg_" ++ nameBase ty)
     from <- newName ("fromCfg_" ++ nameBase ty)
-    let children = maybe (chartRootChildren ch) (nodeChildren . nodeOf ch) g
+    let children = maybe (NE.toList (chartRoot ch)) nodeChildren g
     pure (g, Group ty children to from)
-  let groupMap = Map.fromList [(sid, grp) | (Just sid, grp) <- groups]
+  let groupMap = Map.fromList [(nodeId n, grp) | (Just n, grp) <- groups]
   rootGroup <- case groups of
     (_, g) : _ -> pure g
     [] -> fail "scxml: internal error, no root group"
@@ -121,14 +125,17 @@ generate src = do
 
   -- Every generated constructor and type, with its origin, so clashes give a
   -- readable error instead of "Multiple declarations".
-  let stateCons = [(nameFor sid, "state " ++ show (T.unpack sid)) | sid <- concatMap (gChildren . snd) groups]
+  let stateCons =
+        [ (nameFor (nodeId n), "state " ++ show (T.unpack (nodeId n)))
+        | n <- concatMap (gChildren . snd) groups
+        ]
       typeNames =
         [(stateT, "the state type"), (eventT, "the event type")]
-          ++ [(gType grp, "compound state " ++ show (T.unpack sid)) | (Just sid, grp) <- groups]
+          ++ [(gType grp, "compound state " ++ show (T.unpack (nodeId n))) | (Just n, grp) <- groups]
   checkClashes "constructor" (stateCons ++ eventCons)
   checkClashes "type" typeNames
 
-  stateDecs <- concat <$> mapM (groupDecs ch nameFor groupOf . snd) groups
+  stateDecs <- concat <$> mapM (groupDecs nameFor groupOf . snd) groups
   eventDec <-
     dataD (cxt []) eventT [] Nothing [normalC c [] | (c, _) <- eventCons]
       [derivClause Nothing (map conT (if null eventCons then [''Show, ''Read, ''Eq, ''Ord] else [''Show, ''Read, ''Eq, ''Ord, ''Enum, ''Bounded]))]
@@ -149,7 +156,7 @@ generate src = do
     valD (varP defName)
       (normalB
         [| Def
-             { defChart = $(lift ch)
+             { defIndex = Statechart.Model.index $(lift ch)
              , defEventName = $eventNameE
              , defEventFromName = $eventFromNameE
              , defToConfig = $(varE (gTo rootGroup))
@@ -161,11 +168,13 @@ generate src = do
   -- return m (Maybe FsmEvent), exit callbacks m (). Inlined into each
   -- generated function rather than shared, so a polymorphic monad does not
   -- hit the monomorphism restriction.
+  -- Underscore-prefixed so that a chart with no callbacks of some phase does
+  -- not emit an unused-match warning in the user's module.
   let hooksE = do
-        phase <- newName "phase"
-        name <- newName "name"
-        st <- newName "st"
-        ev <- newName "ev"
+        phase <- newName "_phase"
+        name <- newName "_name"
+        st <- newName "_st"
+        ev <- newName "_ev"
         let call fn = [| $(varE (mkName (T.unpack fn))) $(varE st) $(varE ev) |]
             entryChain =
               foldr (\fn rest -> [| if $(varE name) == $(lift fn) then Run.entryAction $(call fn) else $rest |])
@@ -210,8 +219,8 @@ generate src = do
   pure (stateDecs ++ [eventDec, defSig, defDec, startDec, stepDec, toIdsSig, toIdsDec, fromIdsSig, fromIdsDec])
 
 -- | Data type plus configuration conversions for one compound-like node.
-groupDecs :: Chart -> (StateId -> Name) -> (StateId -> Q Group) -> Group -> Q [Dec]
-groupDecs ch nameFor groupOf grp = do
+groupDecs :: (StateId -> Name) -> (StateId -> Q Group) -> Group -> Q [Dec]
+groupDecs nameFor groupOf grp = do
   shapes <- mapM childShape (gChildren grp)
   let dataDec =
         dataD (cxt []) (gType grp) [] Nothing
@@ -227,7 +236,7 @@ groupDecs ch nameFor groupOf grp = do
         cfg <- newName "cfg"
         let body =
               foldr
-                (\(sid, (_, _, _, rebuild)) rest -> [| if Set.member $(lift sid) $(varE cfg) then $(rebuild cfg) else $rest |])
+                (\(n, (_, _, _, rebuild)) rest -> [| if Set.member $(lift (nodeId n)) $(varE cfg) then $(rebuild cfg) else $rest |])
                 [| Nothing |]
                 (zip (gChildren grp) shapes)
         funD (gFrom grp) [clause [varP cfg] (normalB body) []]
@@ -240,11 +249,12 @@ groupDecs ch nameFor groupOf grp = do
     ]
   where
     -- For one child: (constructor, field types, config-of-fields, rebuild-from-config)
-    childShape :: StateId -> Q (Name, [Name], [Name] -> Q Exp, Name -> Q Exp)
-    childShape sid = do
-      let con = nameFor sid
-      case kindOf ch sid of
-        Compound _ _ -> do
+    childShape :: Node -> Q (Name, [Name], [Name] -> Q Exp, Name -> Q Exp)
+    childShape node = do
+      let sid = nodeId node
+          con = nameFor sid
+      case nodeKind node of
+        Compound _ -> do
           sub <- groupOf sid
           pure
             ( con
@@ -254,12 +264,16 @@ groupDecs ch nameFor groupOf grp = do
                 _ -> fail "scxml: internal error, compound state expects exactly one field"
             , \cfg -> [| fmap $(conE con) ($(varE (gFrom sub)) $(varE cfg)) |]
             )
-        Parallel _ -> do
-          regions <- forM (nodeChildren (nodeOf ch sid)) $ \r -> case kindOf ch r of
-            Compound _ _ -> Just <$> groupOf r
-            Parallel _ -> fail ("scxml: a <parallel> directly inside a <parallel> (" ++ T.unpack r ++ ") is not supported yet")
+        Parallel regionNodes -> do
+          regions <- forM (NE.toList regionNodes) $ \rn -> case nodeKind rn of
+            Compound _ -> Just <$> groupOf (nodeId rn)
+            Parallel _ ->
+              fail $
+                "scxml: <parallel> " ++ T.unpack (nodeId rn) ++ " is directly inside another <parallel>, which is not supported."
+                  ++ " Flatten it: its regions can become regions of the outer <parallel>, since all of them are active at once either way."
+                  ++ " The only thing flattening loses is a done.state event for the inner one on its own."
             _ -> pure Nothing
-          let regionIds = nodeChildren (nodeOf ch sid)
+          let regionIds = map nodeId (NE.toList regionNodes)
               fieldTypes = [gType g | Just g <- regions]
               toE vs =
                 let go [] _ = []

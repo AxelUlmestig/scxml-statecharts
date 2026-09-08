@@ -81,6 +81,7 @@ test-suite spec
     type:             exitcode-stdio-1.0
     hs-source-dirs:   test
     main-is:          Main.hs
+    other-modules:    Reordered
     build-depends:
         base              >=4.18  && <5,
         scxml-statecharts,

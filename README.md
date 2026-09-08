@@ -1,109 +1,96 @@
 # scxml-statecharts
 
 Define a [statechart](https://statecharts.dev/) in SCXML inside a Haskell
-module and get typed states, events and a step function out of it.
+module and get typed states, events and a step function out of it. Compound
+states become sum types and parallel states become products, so a value of the
+state type is exactly one legal configuration: illegal states are
+unrepresentable and `case` is exhaustive.
+
+The library exports one name, the `scxml` quasiquoter. Everything a chart needs
+is generated into your own module.
+
+## Example
+
+A monitor that polls something and reports when it is healthy:
 
 ```haskell
 {-# LANGUAGE QuasiQuotes #-}
-module Order.Fsm where
-import Statechart
+module Monitor where
+
+import Statechart (scxml)
 import Control.Monad.Trans.State.Strict (StateT, gets, modify')
 
 [scxml|
-<scxml name="order-v1" initial="Draft">
-  <state id="Draft">
-    <transition event="Submit" target="Validating"/>
+<scxml initial="Idle">
+  <state id="Idle">
+    <transition event="Check" target="Polling"/>
   </state>
-  <state id="Validating">
-    <onentry><script>validate</script></onentry>
-    <transition event="Valid" target="Processing"/>
-    <transition event="Invalid" target="Rejected"/>
-  </state>
-  <state id="Processing" initial="Authorizing">
-    <onentry><script>reserveStock</script></onentry>
-    <onexit><script>releaseStock</script></onexit>
-    <state id="Authorizing">
-      <onentry><script>checkPrepayment</script></onentry>
-      <transition event="Poll" target="Authorizing"/>
-      <transition event="PaymentAuthorized" target="Fulfilment"/>
+  <state id="Polling" initial="Fetching">
+    <onexit><script>recordRun</script></onexit>
+    <state id="Fetching">
+      <onentry><script>fetchStatus</script></onentry>
+      <transition event="Ok" target="Reporting"/>
     </state>
-    <parallel id="Fulfilment">
-      <state id="Shipping" initial="Packing">
-        <state id="Packing"><transition event="Packed" target="Shipped"/></state>
-        <final id="Shipped"/>
-      </state>
-      <state id="Invoicing" initial="Unpaid">
-        <state id="Unpaid"><transition event="Paid" target="Settled"/></state>
-        <final id="Settled"/>
-      </state>
-      <transition event="done.state.Fulfilment" target="Completed"/>
-    </parallel>
-    <transition event="Cancel" target="Cancelled"/>
+    <state id="Reporting">
+      <onentry><script>sendReport</script></onentry>
+    </state>
+    <transition event="Done" target="Idle"/>
+    <transition event="Failed" target="Idle"/>
   </state>
-  <final id="Completed"><onentry><script>notifyCustomer</script></onentry></final>
-  <final id="Rejected"/>
-  <final id="Cancelled"/>
 </scxml>
 |]
 
--- Signatures for the generated functions are optional; they go *after* the
--- quasiquote, like everything else that refers to the generated types.
-initiateStateMachine :: StateT Shop IO FsmState
-notifyStateMachine   :: FsmState -> FsmEvent -> StateT Shop IO FsmState
+data Monitor = Monitor {healthy :: Bool, runs :: Int, reports :: Int}
 
--- The callbacks named in <script>. They must all be in one monad, and the
--- type checker enforces it. Each sees the state it observes and the event
--- being processed (Nothing during initiateStateMachine).
-validate, reserveStock, notifyCustomer
-  :: FsmState -> Maybe FsmEvent -> StateT Shop IO (Maybe FsmEvent)
-validate _ _ = gets (\shop -> Just (if null (items shop) then Invalid else Valid))
+-- Signatures for the generated functions are optional and go after the
+-- quasiquote, like anything else mentioning the generated types.
+initiateStateMachine :: StateT Monitor IO FsmState
+notifyStateMachine :: FsmState -> FsmEvent -> StateT Monitor IO FsmState
 
-releaseStock :: FsmState -> Maybe FsmEvent -> StateT Shop IO ()
-...
+-- The callbacks named in <script>. They must share one monad, and the type
+-- checker enforces it.
+fetchStatus, sendReport :: FsmState -> Maybe FsmEvent -> StateT Monitor IO (Maybe FsmEvent)
+fetchStatus _ _ = gets (\m -> Just (if healthy m then Ok else Failed))
+sendReport _ _ = modify' (\m -> m {reports = reports m + 1}) >> pure (Just Done)
+
+recordRun :: FsmState -> Maybe FsmEvent -> StateT Monitor IO ()
+recordRun _ _ = modify' (\m -> m {runs = runs m + 1})
 ```
 
-The quasiquote generates fixed names, so **one chart per module**:
+The quasiquote generates:
 
 ```haskell
-data FsmState   = Draft | Validating | Processing Processing | Completed | Rejected | Cancelled
-data Processing = Authorizing | Fulfilment Shipping Invoicing
-data Shipping   = Packing | Shipped
-data Invoicing  = Unpaid | Settled
-data FsmEvent   = Submit | Valid | Invalid | Poll | PaymentAuthorized | Packed | Paid
-                | DoneFulfilment | Cancel | DoneShipping | DoneInvoicing
-initiateStateMachine   -- enter the initial state, running its entry callbacks
-notifyStateMachine     -- deliver one event
+data FsmState = Idle | Polling Polling
+data Polling  = Fetching | Reporting
+data FsmEvent = Check | Ok | Done | Failed
+
+initiateStateMachine    -- enter the initial state, running its entry callbacks
+notifyStateMachine      -- deliver one event
+serializeStateMachine   :: FsmState -> [Text]
+deserializeStateMachine :: [Text] -> Maybe FsmState
 ```
 
-Import the module qualified (`import qualified Order.Fsm as Order`) and every
-chart in the codebase presents the same API: `Order.notifyStateMachine`,
-`Shipment.notifyStateMachine`. A compound state's type has the same name as
-its constructor, which Haskell allows since types and constructors live in
-separate namespaces.
+A compound state becomes a constructor carrying a sum type of the same name,
+which Haskell allows since types and constructors live in separate namespaces.
+Names in the XML are used verbatim, so they must be valid constructor names
+(`PaymentAuthorized`, not `payment.authorized`).
 
-Names are used verbatim: what you read in the XML is what you type in
-Haskell. State ids and event names must therefore be valid constructor names
-(`PaymentAuthorized`, not `payment.authorized`); the quasiquoter rejects
-anything else at compile time. The one exception is SCXML's automatic
-completion event `done.state.X`, which becomes `DoneX`. The `name` attribute
-is optional metadata, kept in `chartName (defChart fsmChart)` for logging and
-persistence, and does not affect the generated names.
+A compound state's initial child is always its first constructor, whether or
+not you wrote it first, so derived `Ord` follows that rather than document
+order. Use `Ord` for `Map` keys and sorting, not for anything you store.
 
-### Why plain functions and not a class
+Do not give a chart module an explicit export list, or the generated functions
+you do not call will draw unused-binding warnings.
 
-`Def FsmState FsmEvent` is a first-class value holding everything a
-`StateMachine` class would provide, so generic code (a persistence layer, a
-test harness, a renderer) takes a `Def` as an argument instead of a
-constraint. Fixed names already give the uniform API a class would, and plain
-functions leave the monad free: `initiateStateMachine :: MonadIO m => m FsmState`
-works exactly as well as a concrete `StateT Shop IO`. A class instance would
-have to name one monad in its head, and the quasiquoter has no way to know
-which one you want.
+One `Check` runs the whole cycle. The chart enters `Polling` and `Fetching`,
+whose entry callback raises `Ok` or `Failed`, and either way it returns to
+`Idle` before `notifyStateMachine` hands back. Anything the callbacks need
+lives in the monad, which plays the role of the SCXML datamodel.
 
 ## Callbacks
 
 `<script>name</script>` inside `<onentry>` or `<onexit>` names a Haskell
-function defined in the same module (after the quasiquote).
+function defined in the same module, after the quasiquote:
 
 ```haskell
 -- onentry: may decide where to go next by raising an event
@@ -112,283 +99,174 @@ name :: FsmState -> Maybe FsmEvent -> m (Maybe FsmEvent)
 name :: FsmState -> Maybe FsmEvent -> m ()
 ```
 
-There is one signature per phase, so an entry callback that raises nothing
-still ends in `pure Nothing`.
-
-Entry callbacks receive the state being entered; exit callbacks receive the
-state being left. The event is the one being processed, or `Nothing` during
+Entry callbacks receive the state being entered, exit callbacks the state being
+left. The event is the one being processed, or `Nothing` during
 `initiateStateMachine`.
 
-An entry callback returning `Just event` raises that event (SCXML's
-`<raise>`). Raised events are queued and processed before
-`notifyStateMachine` returns, so an `<onentry>` that inspects data and decides
-the chart should move on can do so directly. This replaces SCXML's `cond`
-guards, which are deliberately unsupported: a decision becomes a state
-(`Validating` above) whose entry callback raises one of the events leading out
-of it. That keeps the branching visible in the chart as named events, gives
-the decision a state you can observe, and puts the criterion in Haskell where
-the data is. A callback can raise at most one event, so contradictory
-decisions can't be expressed.
+Returning `Just event` raises it, which is SCXML's `<raise>`. Raised events are
+queued and processed before `notifyStateMachine` returns. This is how branching
+is expressed: a decision becomes a state whose entry callback raises one of the
+events leading out of it, which keeps the branching visible in the chart as
+named events and puts the criterion in Haskell where the data is.
 
-Scripts on transitions are also unsupported. Since a callback receives the
-triggering event, an `<onentry>` on the target can do anything a transition
-script could, and it does it for every path into that state rather than one.
-To act on an event without leaving a state, target the state itself: the
-`Poll` self-transition above re-enters `Authorizing` and so re-runs
-`checkPrepayment`, which is the polling pattern.
+A top-level splice and the declarations after it form one declaration group, so
+callbacks can be defined after the quasiquote. They have to be, since they
+mention the generated types.
 
-Anything the callbacks need (a database handle, an inventory, the payload of
-the current event) lives in the monad, which plays the role of the SCXML
-datamodel. `StateT Shop IO` above, `ReaderT Env (ExceptT E IO)`, or a
-polymorphic `MonadIO m` all work.
-
-## Validation
-
-The quasiquoter is intolerant by design: a chart that compiles is a chart that
-runs. Rejected at compile time, with the position in the XML where available:
-
-- **Anything that is not well-formed XML.** The parser is strict, so a missing
-  or mismatched closing tag cannot quietly nest one state inside another:
-
-  ```
-  scxml: document is not well-formed XML: 5:1 (91)-5:9 (99):
-  Expected end element for: <state>, but received: <scxml>
-  ```
-
-- **Transitions that cross levels.** A transition must target a sibling of
-  its source. Reaching into another state's interior would bypass its
-  `initial` declaration; escaping outward would hide which enclosing state is
-  being left. To leave an enclosing state, declare the transition on that
-  state, where it applies anywhere inside it:
-
-  ```
-  scxml: transition from Authorizing to Rejected crosses levels: Authorizing
-  is inside Processing, but Rejected is at the chart root. A transition must
-  target a sibling of its source; to leave Processing, declare the transition
-  on Processing instead
-  ```
-
-  Moving a transition up widens where it applies, which is the trade: on
-  `Authorizing`, a declined payment only mattered while authorizing; on
-  `Processing`, it applies anywhere inside. To keep it narrow, transition to a
-  sibling state whose `<onentry>` raises the event that leaves, the same
-  pattern that replaces `cond`.
-
-- **A compound state without an `initial`, or one that does not name a direct
-  child.** Every state with children must say which child entering it leads
-  to, and it must be a child rather than something deeper, the same rule
-  transitions follow:
-
-  ```
-  scxml: <state id="Processing">: needs an initial attribute naming the child
-  state to enter, for example initial="Authorizing"
-  ```
-
-  SCXML defaults a missing `initial` to the first child in document order.
-  That is not supported, because it makes the entry point depend on the order
-  the children happen to be written in.
-
-- **Transitions on a region of a `<parallel>`.** Sibling regions are active at
-  the same time, so leaving one would leave the others behind, producing a
-  configuration the state type cannot represent. Declare the transition on the
-  `<parallel>` itself, or on a state inside the region.
-
-- **Two transitions on one state for the same event.** With `cond` gone there
-  is nothing to choose between them, so this is always a mistake rather than a
-  precedence question:
-
-  ```
-  scxml: <state id="Start">: two transitions for the event "Go" (to First and
-  Second); with no cond there is nothing to choose between them
-  ```
-
-  Transitions are held as a map from event name to target, so this is
-  unrepresentable in the model rather than merely rejected. Order therefore
-  never decides which transition is taken.
-
-- **A transition naming more than one target.** SCXML allows several to enter
-  several parallel regions at once, but that needs the source to be a region
-  too, and regions cannot have transitions. So more than one target is always
-  invalid here.
-
-- **Duplicate state ids**, which SCXML also forbids, since ids are XML IDs and
-  must be unique across the document. The message says which parents the
-  clashing ids sit under.
-
-- **Unknown state ids, event names or callback names**, ids and event names
-  that are not Haskell constructor names, transitions with no event or no
-  target, duplicate ids, `cond`, `type="internal"`, `done.state.X` naming a
-  state that can never complete, a `<parallel>` with no regions, an atomic
-  state with an `initial`, and unsupported executable content.
-
-This is deliberately stricter than SCXML. Loosening a rule later is a
-compatible change; tightening one is not.
+Callbacks need not share a constraint, only a monad. Their constraints union
+at the generated call site, so one `MonadIO m` callback makes both generated
+functions require `MonadIO`, while a `Monad m` callback keeps its own weaker
+signature and stays usable elsewhere. Declaring the weakest constraint each
+callback needs is therefore still worth it.
 
 ## Semantics
 
-`notifyStateMachine` selects the transitions enabled by the event, runs
-`<onexit>` callbacks of exited states (innermost first), then `<onentry>`
-callbacks of entered states (outermost first). It then processes the
-raised-event queue the same way until it is empty, and returns.
+`notifyStateMachine` runs `<onexit>` callbacks of exited states, innermost
+first, then `<onentry>` callbacks of entered states, outermost first. It then
+processes raised events the same way until none is left, and returns.
 
 An event with no matching transition in the current state is ignored, as in
-SCXML: the state is returned unchanged and nothing runs. A poll result that
-arrives after the chart has moved on is the typical case. A raised event
-nothing handles is dropped too. Cycles of raised events are cut off after 1000
-iterations with an error.
+SCXML: the state comes back unchanged and nothing runs. A poll result arriving
+after the chart moved on is the typical case. A raised event nothing handles is
+dropped too.
 
-Entering a `<final>` state raises `done.state.Parent`, and `done.state.G`
-when every region of a parallel grandparent `G` has reached a final state.
-This is how a parallel state completes; `done.state.Fulfilment` above.
+### A transition on an enclosing state is a default
+
+When an event arrives, each active state looks for a transition starting at the
+innermost active state and working outward, and the first one found wins. So a
+transition on an enclosing state applies everywhere inside it, and an inner
+state can override it:
+
+```xml
+<state id="Processing" initial="Authorizing">
+  <state id="Authorizing">...</state>
+  <parallel id="Fulfilment">
+    ...
+    <transition event="Cancel" target="Refunding"/>   <!-- wins while fulfilling -->
+  </parallel>
+  <state id="Refunding">...</state>
+  <transition event="Cancel" target="Cancelled"/>     <!-- applies elsewhere inside -->
+</state>
+```
+
+`Cancel` refunds while fulfilment is under way and cancels outright anywhere
+else in `Processing`. Only the inner transition is taken, never both, so the
+outer one is a fallback rather than an additional step. Writing the same event
+on a state and on one of its descendants is therefore meaningful, not a
+mistake, but it is worth a comment in the chart since the reader has to know
+this rule to see which one applies.
+
+Entering a `<final>` state raises `done.state.Parent`, and `done.state.G` when
+every region of a parallel grandparent `G` has reached a final state. Each done
+event is handled on the state it names, so completion climbs one level at a
+time. That is how a parallel state completes:
+
+```haskell
+[scxml|
+<scxml initial="Fulfilment">
+  <parallel id="Fulfilment">
+    <state id="Parcel" initial="Packing">
+      <state id="Packing"><transition event="Packed" target="Shipped"/></state>
+      <final id="Shipped"/>
+    </state>
+    <state id="Invoice" initial="Unpaid">
+      <state id="Unpaid"><transition event="Paid" target="Settled"/></state>
+      <final id="Settled"/>
+    </state>
+    <transition event="done.state.Fulfilment" target="Complete"/>
+  </parallel>
+  <final id="Complete"/>
+</scxml>
+|]
+```
+
+```haskell
+data FsmState = Fulfilment Parcel Invoice | Complete
+data Parcel   = Packing | Shipped
+data Invoice  = Unpaid | Settled
+data FsmEvent = Packed | Paid | DoneFulfilment | DoneParcel | DoneInvoice
+```
+
+The parallel state is a product, so both regions advance independently and the
+type cannot represent one of them being absent. `done.state.X` becomes the
+constructor `DoneX`. Whichever region finishes second fires it:
+
+```haskell
+Fulfilment Packing Unpaid  --Packed-->  Fulfilment Shipped Unpaid  --Paid-->  Complete
+```
 
 ## Storing a state
 
-Every generated type derives `Show`, `Read`, `Eq` and `Ord`, so `Show`/`Read`
-round-trip exactly and are convenient in tests. For a state that outlives the
-process, such as one parked in a database between AWS Lambda invocations, use
-the two generated functions instead:
+Every generated type derives `Show`, `Read`, `Eq` and `Ord`, so `Show` and
+`Read` round-trip exactly and are convenient in tests. For a state that
+outlives the process, such as one parked in a database between AWS Lambda
+invocations, use the generated pair:
 
 ```haskell
-serializeStateMachine   :: FsmState -> [Text]
-deserializeStateMachine :: [Text] -> Maybe FsmState
-
-serializeStateMachine (Processing (Fulfilment Shipped Unpaid))
-  == ["Fulfilment","Invoicing","Processing","Shipped","Shipping","Unpaid"]
+serializeStateMachine (Fulfilment Shipped Unpaid)
+  == ["Fulfilment","Invoice","Parcel","Shipped","Unpaid"]
 ```
 
-This is SCXML's own notion of a chart's state, which makes it portable to
-another implementation of the same chart, readable in a log, and queryable as
-a text array or a JSON array in Postgres.
+This is SCXML's own notion of a chart's state, so it is portable to another
+implementation of the same chart, readable in a log, and queryable as a text or
+JSON array in Postgres.
 
-The array is a set, so nothing positional leaks into it. Order and duplicates
-in the input do not matter, and reordering the regions of a `<parallel>` in
-the SCXML does not change it: the Haskell field order flips, so
-`Fulfilment Shipped Unpaid` becomes `Fulfilment Unpaid Shipped`, but both
-serialize to the same array and each chart loads the other's output. Positional
+The array is a set, so nothing positional leaks in. Order and duplicates in the
+input do not matter, and reordering the regions of a `<parallel>` in the SCXML
+does not change it, even though the Haskell field order flips. Positional
 formats such as `Show` do not survive that edit.
 
-Deserializing returns `Maybe` and validates by round-tripping, so an
-incomplete set, an unknown id, or a list that merely starts like a valid
-configuration are all rejected rather than decoded into some other state.
-That matters when a chart is redeployed while states are in flight: a value
-stored under the old chart fails loudly, and you migrate it deliberately
-instead of discovering later that it silently changed meaning.
+Deserializing returns `Maybe` and validates by round-tripping, so an incomplete
+set, an unknown id, or a list that merely starts like a valid configuration are
+rejected rather than decoded into some other state. That matters when a chart is
+redeployed while states are in flight: a value stored under the old chart fails
+loudly and you migrate it deliberately.
 
-Two things not to persist: `Ord` comparisons on states, and `fromEnum` on
-events. Both are positional, so adding a state or an event changes them.
+Two things not to persist: `Ord` on states and `fromEnum` on events. Both are
+positional, so adding a state or an event changes them.
 
 JSON is two lines in your own module, so the library does not depend on
 `aeson`:
 
 ```haskell
 instance ToJSON FsmState where
-  toJSON = toJSON . toStateIds fsmChart
+  toJSON = toJSON . serializeStateMachine
 instance FromJSON FsmState where
-  parseJSON v = parseJSON v >>= maybe (fail "stale FsmState") pure . fromStateIds fsmChart
+  parseJSON v = parseJSON v >>= maybe (fail "stale FsmState") pure . deserializeStateMachine
 ```
 
-### How name resolution works
+## Differences from SCXML
 
-Generated code refers to `reserveStock` and friends by name. A top-level
-splice and the declarations following it form one declaration group in GHC,
-so those functions may be defined after the quasiquote (they have to be, if
-they mention the generated types). Only declarations *before* the quasiquote
-cannot see the generated names.
+The quasiquoter is intolerant by design, and stricter than the specification.
+A chart that compiles is a chart that runs. Loosening a rule later is a
+compatible change, so the defaults are tight.
 
-### Signatures for the generated functions are optional
-
-The quasiquoter cannot write them, because it does not know the monad. It
-knows the callbacks only by the names in the XML, and those functions are in
-the same declaration group, so they are not type-checked when the splice
-runs. `m` comes from them, not from the chart.
-
-You rarely need to write the signatures anyway. When the callbacks are in a
-concrete monad, both generated functions are inferred and GHC only asks for
-signatures under `-Wmissing-signatures`:
-
-```haskell
-notifyStateMachine   :: FsmState -> FsmEvent -> StateT Int IO FsmState  -- inferred
-initiateStateMachine :: StateT Int IO FsmState                          -- inferred
-```
-
-When the callbacks are polymorphic in their monad, `initiateStateMachine`
-takes no arguments and so hits the monomorphism restriction, reported as an
-ambiguous type variable. Either give that one binding a signature, or put
-`{-# LANGUAGE NoMonomorphismRestriction #-}` on the module; both leave the
-rest to inference.
-
-### Callbacks may carry different constraints
-
-They do not all need the same constraint, and each keeps the one it declares.
-The generated functions call every callback at a single `m`, so their
-constraints union there:
-
-```haskell
-announce        :: MonadIO m => FsmState -> Maybe FsmEvent -> m (Maybe FsmEvent)
-pureBookkeeping :: Monad m   => FsmState -> Maybe FsmEvent -> m ()
--- inferred, the union of the two:
-notifyStateMachine :: MonadIO m => FsmState -> FsmEvent -> m FsmState
-```
-
-So `MonadIO` does win for the chart as a whole, but only at that call site.
-`pureBookkeeping` keeps its `Monad m` and stays usable elsewhere at a pure
-monad such as `Identity`. Declaring the weakest constraint each callback
-needs therefore still pays: it documents the effect it has, and keeps the
-function reusable outside the chart.
-
-## Type mapping
-
-| SCXML                   | Haskell                                                           |
-|-------------------------|-------------------------------------------------------------------|
-| atomic / final state    | nullary constructor                                               |
-| compound state          | constructor carrying a sum type of the same name                  |
-| parallel state          | constructor with one field per compound region                    |
-| event name              | constructor of `FsmEvent`                                         |
-| `event="A B"`           | shorthand for two transitions with the same target                |
-| `done.state.X`          | constructor `DoneX`                                               |
-| the active configuration | `toStateIds` / `fromStateIds`, for storage                       |
-| `<script>name</script>` in `<onentry>` | `name :: FsmState -> Maybe FsmEvent -> m (Maybe FsmEvent)` |
-| `<script>name</script>` in `<onexit>`  | `name :: FsmState -> Maybe FsmEvent -> m ()`               |
-
-A value of `FsmState` is exactly one legal configuration, so illegal
-configurations are unrepresentable and `case` on it is exhaustive.
-
-## Architecture
-
-- `Statechart.Model`: untyped chart (nodes, transitions, document order).
-- `Statechart.Parse`: SCXML to `Chart`, with validation (unique ids, known
-  targets, initial states are descendants).
-- `Statechart.Interpret`: the SCXML Appendix D algorithm on sets of active
-  state ids: transition selection with conflict resolution, exit and entry
-  sets via the least common compound ancestor, the raised-event queue, and
-  `done.state` events.
-- `Statechart.Run`: `start`/`step` over a `Def` plus a `Hooks` dispatcher.
-- `Statechart.TH`: the `scxml` quasiquoter. Generates the types,
-  `toConfig`/`fromConfig` conversions, the `Def` record, and the two
-  wrappers whose hooks dispatch to the callbacks named in the SCXML. All
-  semantics live in the interpreter; the generated code is only the typed
-  shell around it. A fully static transition table per (state, event) is a
-  possible later optimisation.
-
-## Deliberately unsupported
-
-- `cond` guards and eventless transitions: raise an event from an entry
-  callback instead (see Callbacks).
-- `<script>` on a transition, and transitions without a target: use the
-  target's `<onentry>`, or a self-transition to act without leaving a state.
-- Transitions into another state's interior, and `type="internal"`: see
-  Validation.
-- Static `<raise event="..."/>`: return the event from a callback instead.
-- Event names that aren't Haskell constructor names.
-- More than one chart per module (the generated names are fixed).
-
-## Not yet supported
-
-- `<history>` states, wildcard event descriptors (`error.*`, `*`).
-- Executable content other than `<script>functionName</script>` (`<assign>`,
-  `<send>`, `<if>`, `<log>`) is rejected.
-- A `<parallel>` directly inside a `<parallel>`.
-
+- **No `cond` guards and no eventless transitions.** Raise an event from an
+  entry callback instead.
+- **A transition must target a sibling of its source.** Events never cross
+  levels. To leave an enclosing state, declare the transition on that state,
+  where it applies anywhere inside it.
+- **`initial` is required on every compound state** and must name a direct
+  child, which the model records by keeping that child first. The
+  specification's "first child in document order" default is not supported,
+  because it makes the entry point depend on the order children happen to be
+  written in.
+- **One transition per state per event**, held as a map from event name to
+  target, so nothing has to break a tie. `event="A B"` is still shorthand for
+  two transitions to the same target.
+- **`done.state.X` may only be handled on `X` itself.** Since a transition
+  also targets a sibling, completion climbs one level at a time: a state that
+  finishes moves to a `<final>` sibling, which completes their parent and
+  raises its own done event. Listening for another region's completion from
+  inside a sibling region is not supported; raise your own event from the final
+  state's `<onentry>` if you want that.
+- **State ids and event names must be Haskell constructor names**, and ids must
+  be unique across the whole chart, which SCXML requires anyway.
+- **Parsing is strict.** Malformed XML cannot quietly nest one state inside
+  another.
+- **Not supported yet:** `<history>` states, wildcard event descriptors,
+  executable content other than `<script>`, and a `<parallel>` directly inside
+  another `<parallel>`, which can almost always be flattened into one.
 
 ## Building
 

@@ -11,6 +11,7 @@ import System.Exit (exitFailure)
 
 -- The library's entire public API.
 import Statechart (scxml)
+import qualified Reordered
 
 -- An order process: compound states, a parallel state that completes via
 -- SCXML's automatic done.state event, a choice state whose entry callback
@@ -55,11 +56,16 @@ import Statechart (scxml)
         </state>
         <final id="Settled"/>
       </state>
+      <!-- Only Fulfilment may react to its own completion, and it can only
+           reach a sibling, so it moves to a final state of Processing. That
+           completes Processing, whose own done event carries it further out. -->
+      <transition event="done.state.Fulfilment" target="Fulfilled"/>
     </parallel>
+    <final id="Fulfilled"/>
     <!-- Leaving Processing is declared on Processing: transitions never
          cross levels, so these apply anywhere inside it. -->
     <transition event="PaymentDeclined" target="Rejected"/>
-    <transition event="done.state.Fulfilment" target="Completed"/>
+    <transition event="done.state.Processing" target="Completed"/>
     <transition event="Cancel" target="Cancelled"/>
   </state>
 
@@ -75,12 +81,13 @@ import Statechart (scxml)
 --
 --   data FsmState   = Draft | Validating | Processing Processing
 --                   | Completed | Rejected | Cancelled
---   data Processing = Authorizing | Fulfilment Shipping Invoicing
+--   data Processing = Authorizing | Fulfilment Shipping Invoicing | Fulfilled
 --   data Shipping   = Packing | Shipped
 --   data Invoicing  = Unpaid | Settled
 --   data FsmEvent   = Submit | Discard | Abandon | Valid | Invalid | Poll
---                   | PaymentAuthorized | Packed | Paid | PaymentDeclined
---                   | DoneFulfilment | Cancel | DoneShipping | DoneInvoicing
+--                   | PaymentAuthorized | Packed | Paid | DoneFulfilment
+--                   | PaymentDeclined | DoneProcessing | Cancel
+--                   | DoneShipping | DoneInvoicing
 --   initiateStateMachine, notifyStateMachine   -- signatures below are ours
 --   serializeStateMachine   :: FsmState -> [Text]
 --   deserializeStateMachine :: [Text] -> Maybe FsmState
@@ -168,11 +175,14 @@ main = do
   -- callbacks run in SCXML order with the state and event they observe.
   (end, shop) <- runEvents (shopWith ["book"]) [Submit, PaymentAuthorized, Paid, Packed]
   check "happy path reaches Completed" Completed end
+  -- Completion climbs one level at a time: Fulfilment finishing moves it to
+  -- the final state Fulfilled, which completes Processing, whose own done
+  -- event leaves it. All inside one call, so the caller sees only Completed.
   check "callbacks in order, with state and event"
     [ "reserved stock"
     , "checked prepayment"
-    , "released stock leaving Processing (Fulfilment Shipped Settled)"
-    , "notified customer: Completed after DoneFulfilment"
+    , "released stock leaving Processing Fulfilled"
+    , "notified customer: Completed after DoneProcessing"
     ]
     (log_ shop)
   check "release resets the reservation" 0 (reserved shop)
@@ -252,7 +262,8 @@ main = do
     (Cancelled, Cancelled) (viaDiscard, viaAbandon)
   check "all events, in document order"
     [ Submit, Discard, Abandon, Valid, Invalid, Poll, PaymentAuthorized, Packed
-    , Paid, PaymentDeclined, DoneFulfilment, Cancel, DoneShipping, DoneInvoicing ]
+    , Paid, DoneFulfilment, PaymentDeclined, DoneProcessing, Cancel
+    , DoneShipping, DoneInvoicing ]
     [minBound .. maxBound :: FsmEvent]
 
   -- Serialization. Show/Read round-trips exactly; the id list is the portable
@@ -271,6 +282,10 @@ main = do
     (deserializeStateMachine ["Processing"])
   check "an unknown id is rejected" Nothing (deserializeStateMachine ["Archived"])
   check "an empty list is rejected" Nothing (deserializeStateMachine [])
+
+  -- A second chart, in its own module since the generated names are fixed.
+  reordered <- Reordered.spec
+  mapM_ (\(label, expected, actual) -> check label expected actual) reordered
 
   n <- readIORef failures
   when (n > 0) exitFailure
