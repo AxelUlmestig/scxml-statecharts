@@ -11,6 +11,7 @@ import System.Exit (exitFailure)
 
 -- The library's entire public API.
 import Statechart (scxml)
+import qualified Overrides
 import qualified Reordered
 
 -- An order process: compound states, a parallel state that completes via
@@ -285,7 +286,8 @@ main = do
 
   -- A second chart, in its own module since the generated names are fixed.
   reordered <- Reordered.spec
-  mapM_ (\(label, expected, actual) -> check label expected actual) reordered
+  overrides <- Overrides.spec
+  mapM_ (\(label, expected, actual) -> check label expected actual) (reordered ++ overrides)
 
   n <- readIORef failures
   when (n > 0) exitFailure
