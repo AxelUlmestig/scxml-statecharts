@@ -14,7 +14,7 @@
 module Statechart.Interpret
   ( Configuration
   , Phase (..)
-  , Hooks (..)
+  , Callbacks (..)
   , doneEventName
   , start
   , macrostep
@@ -37,8 +37,11 @@ type Configuration = Set StateId
 data Phase = OnEntry | OnExit
   deriving (Eq, Ord, Show)
 
-newtype Hooks m = Hooks
-  { hookAction :: Phase -> Text -> Configuration -> Maybe Text -> m (Maybe Text)
+-- | How the evaluator reaches the callbacks, in the only terms it knows:
+-- state ids and event names. "Statechart.Run" wraps the typed
+-- 'Statechart.Run.Hooks' into one of these.
+newtype Callbacks m = Callbacks
+  { runCallback :: Phase -> Text -> Configuration -> Maybe Text -> m (Maybe Text)
     -- ^ run the named callback, given the configuration it observes and the
     -- event being processed ('Nothing' during 'start'); returns an event to raise
   }
@@ -217,39 +220,39 @@ inFinalState cfg n = case nodeKind n of
 -- Running -------------------------------------------------------------------
 
 -- | Enter the chart's initial state, then process whatever that raises.
-start :: Monad m => Chart -> Hooks m -> m Configuration
-start ch hooks = do
+start :: Monad m => Chart -> Callbacks m -> m Configuration
+start ch cbs = do
   let entered = enter (NE.head (chartRoot ch))
       cfg = enConfig entered
-  raised <- runEntries hooks cfg Nothing (enEntered entered)
-  runToCompletion ch hooks cfg raised
+  raised <- runEntries cbs cfg Nothing (enEntered entered)
+  runToCompletion ch cbs cfg raised
 
 -- | Process one external event. 'Nothing' if no transition was enabled for it.
-macrostep :: Monad m => Chart -> Hooks m -> Configuration -> Text -> m (Maybe Configuration)
-macrostep ch hooks cfg ev = do
-  r <- microstep ch hooks cfg ev
+macrostep :: Monad m => Chart -> Callbacks m -> Configuration -> Text -> m (Maybe Configuration)
+macrostep ch cbs cfg ev = do
+  r <- microstep ch cbs cfg ev
   case r of
     Nothing -> pure Nothing
-    Just (cfg', raised) -> Just <$> runToCompletion ch hooks cfg' raised
+    Just (cfg', raised) -> Just <$> runToCompletion ch cbs cfg' raised
 
 -- | Process raised events in order until the queue is empty. One that no
 -- transition handles is dropped.
-runToCompletion :: Monad m => Chart -> Hooks m -> Configuration -> [Text] -> m Configuration
-runToCompletion ch hooks = go (0 :: Int)
+runToCompletion :: Monad m => Chart -> Callbacks m -> Configuration -> [Text] -> m Configuration
+runToCompletion ch cbs = go (0 :: Int)
   where
     go _ cfg [] = pure cfg
     go n cfg (e : rest)
       | n > 1000 = error "Statechart: raised events do not terminate (a callback keeps raising an event that leads back to it)"
       | otherwise = do
-          r <- microstep ch hooks cfg e
+          r <- microstep ch cbs cfg e
           case r of
             Nothing -> go (n + 1) cfg rest
             Just (cfg', raised) -> go (n + 1) cfg' (rest ++ raised)
 
 -- | One event, one pass. The chart root behaves as a compound state: exactly
 -- one of its children is active, and it has no transitions of its own.
-microstep :: Monad m => Chart -> Hooks m -> Configuration -> Text -> m (Maybe (Configuration, [Text]))
-microstep ch hooks cfg ev =
+microstep :: Monad m => Chart -> Callbacks m -> Configuration -> Text -> m (Maybe (Configuration, [Text]))
+microstep ch cbs cfg ev =
   case activeChild cfg (chartRoot ch) of
     Nothing -> pure Nothing
     Just active ->
@@ -262,20 +265,20 @@ microstep ch hooks cfg ev =
                     Just tgt ->
                       let e = enter (childNamed tgt (chartRoot ch))
                        in (enConfig e, exiting cfg active, enEntered e)
-              mapM_ (runExits hooks cfg ev) exited
-              raised <- runEntries hooks cfg' (Just ev) entered
+              mapM_ (runExits cbs cfg ev) exited
+              raised <- runEntries cbs cfg' (Just ev) entered
               pure (Just (cfg', raised))
 
 -- | Exit callbacks see the state being left, so they get the old configuration.
-runExits :: Monad m => Hooks m -> Configuration -> Text -> Node -> m ()
-runExits hooks cfg ev n =
-  mapM_ (\a -> hookAction hooks OnExit a cfg (Just ev)) (nodeOnExit n)
+runExits :: Monad m => Callbacks m -> Configuration -> Text -> Node -> m ()
+runExits cbs cfg ev n =
+  mapM_ (\a -> runCallback cbs OnExit a cfg (Just ev)) (nodeOnExit n)
 
 -- | Entry callbacks see the configuration the step settles in, so they all get
 -- the new one even though they run outermost first.
-runEntries :: Monad m => Hooks m -> Configuration -> Maybe Text -> [(Node, [Text])] -> m [Text]
-runEntries hooks cfg ev = fmap concat . mapM one
+runEntries :: Monad m => Callbacks m -> Configuration -> Maybe Text -> [(Node, [Text])] -> m [Text]
+runEntries cbs cfg ev = fmap concat . mapM one
   where
     one (n, dones) = do
-      raised <- mapM (\a -> hookAction hooks OnEntry a cfg ev) (nodeOnEntry n)
+      raised <- mapM (\a -> runCallback cbs OnEntry a cfg ev) (nodeOnEntry n)
       pure ([r | Just r <- raised] ++ dones)

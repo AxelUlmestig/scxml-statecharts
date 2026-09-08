@@ -40,9 +40,9 @@ entryAction = id
 exitAction :: m () -> m ()
 exitAction = id
 
-toInterp :: Monad m => Def s ev -> Hooks m s ev -> I.Hooks m
+toInterp :: Monad m => Def s ev -> Hooks m s ev -> I.Callbacks m
 toInterp def h =
-  I.Hooks $ \phase name cfg ev ->
+  I.Callbacks $ \phase name cfg ev ->
     fmap (defEventName def) <$> runAction h phase name (unsafeFromConfig def cfg) (typedEvent def <$> ev)
 
 -- | The generator emits a constructor for every event name the interpreter can
