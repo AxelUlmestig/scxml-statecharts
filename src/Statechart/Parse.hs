@@ -14,6 +14,8 @@
 --
 -- A transition must target a sibling of its source: events never cross
 -- levels. To leave an enclosing state, put the transition on that state.
+-- @initial@ follows the same rule and is required on every compound state:
+-- it must name a direct child.
 --
 -- Not yet supported: @<history>@, wildcard event descriptors, other
 -- executable content (@<assign>@, @<raise>@, @<send>@, ...).
@@ -28,7 +30,8 @@ module Statechart.Parse (parseScxml) where
 
 import Control.Monad (ap, forM_, unless, when)
 import Data.Char (isAlphaNum, isUpper)
-import Data.List (group, sort, stripPrefix)
+import Data.List (group, intercalate, sort, stripPrefix)
+import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isNothing, listToMaybe)
 
@@ -189,20 +192,36 @@ scriptsOf label el = concat <$> mapM one (elChildren el)
           Left (label ++ ": executable content <" ++ localName c ++ "> is not supported; use <script>functionName</script>")
       | otherwise = Right []
 
-initialOf :: String -> Element -> [StateId] -> Either String [StateId]
-initialOf label el defaultChildren =
+-- | The child state that entering a compound state (or the @<scxml>@ root)
+-- leads to. Required, exactly one, and a direct child: entering must not
+-- reach into another state's interior, the same rule transitions follow.
+initialOf :: String -> Element -> [StateId] -> Either String StateId
+initialOf label el children =
   case (attr "initial" el, childrenNamed ["initial"] el) of
-    (Just i, []) -> nonEmpty "initial attribute" i
+    (Just i, []) -> one "initial attribute" i
     (Nothing, [ie]) -> case childrenNamed ["transition"] ie of
-      [t] | Just tg <- attr "target" t -> nonEmpty "<initial> transition target" tg
+      [t] | Just tg <- attr "target" t -> one "<initial> transition target" tg
       _ -> Left (label ++ ": <initial> must contain exactly one <transition target=...>")
-    (Nothing, []) -> Right (take 1 defaultChildren)
+    (Nothing, []) ->
+      Left $
+        label ++ ": needs an initial attribute naming the child state to enter, for example initial="
+          ++ show (maybe "..." T.unpack (listToMaybe children))
     (Just _, _ : _) -> Left (label ++ ": has both an initial attribute and an <initial> element")
     (Nothing, _ : _ : _) -> Left (label ++ ": has more than one <initial> element")
   where
-    nonEmpty what s = case map T.pack (words s) of
+    one what s = case map T.pack (words s) of
+      [c]
+        | c `elem` children -> Right c
+        | otherwise ->
+            Left $
+              label ++ ": " ++ what ++ " " ++ show (T.unpack c) ++ " must name one of its direct child states ("
+                ++ intercalate ", " (map T.unpack children)
+                ++ "); entering a state may not reach into another state's interior"
       [] -> Left (label ++ ": empty " ++ what)
-      ts -> Right ts
+      cs ->
+        Left $
+          label ++ ": " ++ what ++ " names several states (" ++ unwords (map T.unpack cs)
+            ++ "); exactly one child state is required"
 
 buildNode :: Maybe StateId -> Element -> P [Node]
 buildNode parent el = do
@@ -223,30 +242,25 @@ buildNode parent el = do
   onEntry <- liftE (concat <$> mapM (scriptsOf (label ++ " <onentry>")) (childrenNamed ["onentry"] el))
   onExit <- liftE (concat <$> mapM (scriptsOf (label ++ " <onexit>")) (childrenNamed ["onexit"] el))
   let children = [nodeId n | n <- descendants, nodeParent n == Just sid]
-  kind <- case tag of
-    "parallel" -> do
-      when (null children) $ throwP (label ++ ": <parallel> must contain at least one region")
-      pure Parallel
-    "final" -> do
+  kind <- case (tag, NE.nonEmpty children) of
+    ("parallel", Nothing) -> throwP (label ++ ": <parallel> must contain at least one region")
+    ("parallel", Just regions) -> do
+      when (hasInitial el) $ throwP (label ++ ": <parallel> cannot specify an initial state; every region is entered")
+      pure (Parallel regions)
+    ("final", _) -> do
       unless (null children) $ throwP (label ++ ": final states cannot contain states")
       unless (null trans) $ throwP (label ++ ": final states cannot have transitions")
+      when (hasInitial el) $ throwP (label ++ ": final states cannot specify an initial state")
       pure Final
-    _ -> pure (if null children then Atomic else Compound)
-  initial <- case kind of
-    Compound -> liftE (initialOf label el children)
-    Parallel -> do
-      when (hasInitial el) $ throwP (label ++ ": <parallel> cannot specify an initial state")
-      pure children
-    _ -> do
+    (_, Nothing) -> do
       when (hasInitial el) $ throwP (label ++ ": atomic states cannot specify an initial state")
-      pure []
+      pure Atomic
+    (_, Just kids) -> Compound kids <$> liftE (initialOf label el children)
   let node =
         Node
           { nodeId = sid
           , nodeKind = kind
           , nodeParent = parent
-          , nodeChildren = children
-          , nodeInitial = initial
           , nodeTransitions = trans
           , nodeOnEntry = onEntry
           , nodeOnExit = onExit
@@ -307,19 +321,14 @@ validate :: Chart -> Either String ()
 validate ch = do
   let known s = Map.member s (chartNodes ch)
       check what s = unless (known s) $ Left (what ++ " refers to unknown state " ++ show (T.unpack s))
-  forM_ (chartInitial ch) (check "<scxml> initial")
   forM_ (allNodes ch) $ \n -> do
-    case nodeParent n >>= \p -> if kindOf ch p == Parallel then Just p else Nothing of
+    case nodeParent n >>= \p -> if isParallel (kindOf ch p) then Just p else Nothing of
       Just p | not (null (nodeTransitions n)) ->
         Left $
           T.unpack (nodeId n) ++ " is a region of the <parallel> " ++ T.unpack p
             ++ " and cannot have transitions: its sibling regions are active at the same time, so leaving it would leave them behind."
             ++ " Declare the transition on " ++ T.unpack p ++ " or on a state inside " ++ T.unpack (nodeId n) ++ "."
       _ -> Right ()
-    forM_ (nodeInitial n) $ \i -> do
-      check ("initial of " ++ T.unpack (nodeId n)) i
-      unless (isDescendantOf ch i (Just (nodeId n))) $
-        Left ("initial of " ++ T.unpack (nodeId n) ++ " must be one of its descendants, got " ++ T.unpack i)
     forM_ (nodeTransitions n) $ \t -> do
       forM_ (trTargets t) $ \tgt -> do
         check ("transition from " ++ T.unpack (nodeId n)) tgt

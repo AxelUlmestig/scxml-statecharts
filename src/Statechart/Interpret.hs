@@ -21,6 +21,7 @@ module Statechart.Interpret
   ) where
 
 import Data.List (sortOn)
+import qualified Data.List.NonEmpty as NE
 import Data.Maybe (catMaybes)
 import Data.Ord (Down (..))
 import Data.Set (Set)
@@ -54,16 +55,13 @@ doneEventName s = T.pack "done.state." <> s
 -- their regions can); a compound state needs a @<final>@ child.
 canComplete :: Chart -> StateId -> Bool
 canComplete ch s = case kindOf ch s of
-  Parallel -> True
-  Compound -> any (\c -> kindOf ch c == Final) (nodeChildren (nodeOf ch s))
+  Parallel _ -> True
+  Compound _ _ -> any (\c -> kindOf ch c == Final) (nodeChildren (nodeOf ch s))
   _ -> False
 
 -- | The configuration after default entry, without running actions.
 initialConfiguration :: Chart -> Configuration
-initialConfiguration ch =
-  let targets = chartInitial ch
-      withDescendants = foldl' (addDescendants ch) Set.empty targets
-   in foldl' (\acc s -> addAncestors ch s Nothing acc) withDescendants targets
+initialConfiguration ch = addDescendants ch Set.empty (chartInitial ch)
 
 -- | Enter the initial configuration, running entry actions, then process any
 -- events they raise.
@@ -128,13 +126,13 @@ doneEvents ch cfg s
       Nothing -> []
       Just p ->
         doneEventName p : case nodeParent (nodeOf ch p) of
-          Just g | kindOf ch g == Parallel, all (inFinalState ch cfg) (nodeChildren (nodeOf ch g)) -> [doneEventName g]
+          Just g | isParallel (kindOf ch g), all (inFinalState ch cfg) (nodeChildren (nodeOf ch g)) -> [doneEventName g]
           _ -> []
 
 inFinalState :: Chart -> Configuration -> StateId -> Bool
 inFinalState ch cfg s = case kindOf ch s of
-  Compound -> any (\c -> kindOf ch c == Final && Set.member c cfg) (nodeChildren (nodeOf ch s))
-  Parallel -> all (inFinalState ch cfg) (nodeChildren (nodeOf ch s))
+  Compound _ _ -> any (\c -> kindOf ch c == Final && Set.member c cfg) (nodeChildren (nodeOf ch s))
+  Parallel _ -> all (inFinalState ch cfg) (nodeChildren (nodeOf ch s))
   _ -> False
 
 -- Transition selection -------------------------------------------------------
@@ -187,11 +185,10 @@ addDescendants ch acc s =
   let acc1 = Set.insert s acc
       n = nodeOf ch s
    in case nodeKind n of
-        Compound ->
-          let inits = nodeInitial n
-              acc2 = foldl' (addDescendants ch) acc1 inits
-           in foldl' (\a i -> addAncestors ch i (Just s) a) acc2 inits
-        Parallel -> foldl' (enterRegion ch) acc1 (nodeChildren n)
+        -- The initial child is a direct child, so it brings no intermediate
+        -- ancestors of its own to enter.
+        Compound _ c -> addDescendants ch acc1 c
+        Parallel rs -> foldl' (enterRegion ch) acc1 (NE.toList rs)
         _ -> acc1
 
 -- | Add the ancestors of a state up to (excluding) the given ancestor, entering
@@ -204,7 +201,7 @@ addAncestors ch s ancestor acc =
       let a1 = Set.insert anc a
           n = nodeOf ch anc
        in case nodeKind n of
-            Parallel -> foldl' (enterRegion ch) a1 (nodeChildren n)
+            Parallel rs -> foldl' (enterRegion ch) a1 (NE.toList rs)
             _ -> a1
 
 enterRegion :: Chart -> Set StateId -> StateId -> Set StateId

@@ -8,6 +8,9 @@ module Statechart.Model
   , Transition (..)
   , Node (..)
   , Chart (..)
+  , nodeChildren
+  , childrenOfKind
+  , isParallel
   , nodeOf
   , kindOf
   , orderOf
@@ -19,6 +22,8 @@ module Statechart.Model
   ) where
 
 import Data.List (find, sortOn)
+import Data.List.NonEmpty (NonEmpty)
+import qualified Data.List.NonEmpty as NE
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -28,11 +33,36 @@ import Language.Haskell.TH.Syntax (Lift)
 -- | A state's @id@ attribute, which is also its Haskell constructor name.
 type StateId = Text
 
--- | What kind of state a node is: a leaf, a state with children of which
--- exactly one is active, a state whose regions are all active at once, or a
--- terminal state that raises a @done.state@ event on entry.
-data Kind = Atomic | Compound | Parallel | Final
+-- | What kind of state a node is, together with its children, so that a
+-- state cannot have the wrong ones:
+--
+-- * 'Atomic' is a leaf and 'Final' is terminal, so neither has children.
+-- * 'Compound' has children of which exactly one is active, and carries the
+--   one that entering it leads to.
+-- * 'Parallel' has regions, all of which are active at once, so there is no
+--   initial one to choose.
+--
+-- The parser still enforces what the type cannot: that a compound state's
+-- initial child is one of its own children, that a final state has no
+-- transitions, and that every id named here exists in the chart.
+data Kind
+  = Atomic
+  | Compound (NonEmpty StateId) StateId
+  | Parallel (NonEmpty StateId)
+  | Final
   deriving (Eq, Ord, Show, Lift)
+
+-- | Child states of a kind, in document order.
+childrenOfKind :: Kind -> [StateId]
+childrenOfKind Atomic = []
+childrenOfKind Final = []
+childrenOfKind (Compound cs _) = NE.toList cs
+childrenOfKind (Parallel rs) = NE.toList rs
+
+-- | Whether every child is active at once.
+isParallel :: Kind -> Bool
+isParallel (Parallel _) = True
+isParallel _ = False
 
 -- | One @<transition>@ element.
 data Transition = Transition
@@ -48,8 +78,6 @@ data Node = Node
   { nodeId          :: StateId
   , nodeKind        :: Kind
   , nodeParent      :: Maybe StateId -- ^ 'Nothing' for children of @<scxml>@
-  , nodeChildren    :: [StateId]     -- ^ document order
-  , nodeInitial     :: [StateId]     -- ^ default entry targets (compound: usually one; parallel: all children)
   , nodeTransitions :: [Transition]  -- ^ document order
   , nodeOnEntry     :: [Text]        -- ^ names of @<onentry><script>@ actions
   , nodeOnExit      :: [Text]        -- ^ names of @<onexit><script>@ actions
@@ -63,10 +91,14 @@ data Node = Node
 data Chart = Chart
   { chartName         :: Maybe Text
   , chartRootChildren :: [StateId]
-  , chartInitial      :: [StateId]
+  , chartInitial      :: StateId     -- ^ the child of @<scxml>@ entered first
   , chartNodes        :: Map StateId Node
   }
   deriving (Eq, Show, Lift)
+
+-- | Child states in document order, taken from the node's 'Kind'.
+nodeChildren :: Node -> [StateId]
+nodeChildren = childrenOfKind . nodeKind
 
 -- | Look up a state. Calls 'error' on an unknown id, which the parser's
 -- validation rules out for any chart it accepted.

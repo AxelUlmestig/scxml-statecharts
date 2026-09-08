@@ -175,6 +175,20 @@ runs. Rejected at compile time, with the position in the XML where available:
   sibling state whose `<onentry>` raises the event that leaves, the same
   pattern that replaces `cond`.
 
+- **A compound state without an `initial`, or one that does not name a direct
+  child.** Every state with children must say which child entering it leads
+  to, and it must be a child rather than something deeper, the same rule
+  transitions follow:
+
+  ```
+  scxml: <state id="Processing">: needs an initial attribute naming the child
+  state to enter, for example initial="Authorizing"
+  ```
+
+  SCXML defaults a missing `initial` to the first child in document order.
+  That is not supported, because it makes the entry point depend on the order
+  the children happen to be written in.
+
 - **Transitions on a region of a `<parallel>`.** Sibling regions are active at
   the same time, so leaving one would leave the others behind, producing a
   configuration the state type cannot represent. Declare the transition on the

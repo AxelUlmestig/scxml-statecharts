@@ -13,10 +13,6 @@
 --   with one field per compound region; atomic and final states are nullary.
 -- * @data FsmEvent@: one constructor per event name, verbatim, plus @DoneX@
 --   for SCXML's automatic @done.state.X@ completion events.
---
--- Every generated type derives @Show@, @Read@, @Eq@ and @Ord@, and the event
--- type also derives @Enum@ and @Bounded@. For storing a state outside Haskell,
--- prefer 'Statechart.Run.toStateIds' over @Show@.
 -- * @fsmChart :: Def FsmState FsmEvent@, for "Statechart.Run".
 -- * @initiateStateMachine@ and @notifyStateMachine@, which run the chart
 --   calling the callbacks named in @<script>@ elements. Callbacks are looked
@@ -30,6 +26,10 @@
 -- entryCallback :: FsmState -> Maybe FsmEvent -> m (Maybe FsmEvent)
 -- exitCallback  :: FsmState -> Maybe FsmEvent -> m ()
 -- @
+--
+-- Every generated type derives @Show@, @Read@, @Eq@ and @Ord@, and the event
+-- type also derives @Enum@ and @Bounded@. For storing a state outside
+-- Haskell, prefer 'Statechart.Run.toStateIds' over @Show@.
 module Statechart.TH (scxml) where
 
 import Control.Monad (forM, unless)
@@ -82,7 +82,7 @@ generate src = do
       -- A compound state's type has the same name as its constructor; Haskell
       -- keeps types and constructors in separate namespaces.
       nameFor sid = mkName (T.unpack sid)
-      compounds = [nodeId n | n <- allNodes ch, nodeKind n == Compound]
+      compounds = [nodeId n | n <- allNodes ch, Compound _ _ <- [nodeKind n]]
 
   -- Callback names
   let entryActions = nub (concatMap nodeOnEntry (allNodes ch))
@@ -215,7 +215,7 @@ groupDecs ch nameFor groupOf grp = do
     childShape sid = do
       let con = nameFor sid
       case kindOf ch sid of
-        Compound -> do
+        Compound _ _ -> do
           sub <- groupOf sid
           pure
             ( con
@@ -225,10 +225,10 @@ groupDecs ch nameFor groupOf grp = do
                 _ -> fail "scxml: internal error, compound state expects exactly one field"
             , \cfg -> [| fmap $(conE con) ($(varE (gFrom sub)) $(varE cfg)) |]
             )
-        Parallel -> do
+        Parallel _ -> do
           regions <- forM (nodeChildren (nodeOf ch sid)) $ \r -> case kindOf ch r of
-            Compound -> Just <$> groupOf r
-            Parallel -> fail ("scxml: a <parallel> directly inside a <parallel> (" ++ T.unpack r ++ ") is not supported yet")
+            Compound _ _ -> Just <$> groupOf r
+            Parallel _ -> fail ("scxml: a <parallel> directly inside a <parallel> (" ++ T.unpack r ++ ") is not supported yet")
             _ -> pure Nothing
           let regionIds = nodeChildren (nodeOf ch sid)
               fieldTypes = [gType g | Just g <- regions]
