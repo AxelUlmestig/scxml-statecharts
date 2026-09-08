@@ -156,7 +156,7 @@ generate src = do
     valD (varP defName)
       (normalB
         [| Def
-             { defIndex = Statechart.Model.index $(lift ch)
+             { defChart = $(lift ch)
              , defEventName = $eventNameE
              , defEventFromName = $eventFromNameE
              , defToConfig = $(varE (gTo rootGroup))

@@ -4,14 +4,13 @@ module Statechart.Def (Def (..)) where
 import Data.Set (Set)
 import Data.Text (Text)
 
-import Statechart.Model (Index, StateId)
+import Statechart.Model (Chart, StateId)
 
 -- | Ties a chart's generated types together with the untyped chart the
 -- interpreter runs. @s@ is the state type and @ev@ the event type. The @scxml@
 -- quasiquoter generates one of these per chart.
 data Def s ev = Def
-  { defIndex         :: Index
-    -- ^ the chart, indexed for lookup. Built once from the lifted tree.
+  { defChart         :: Chart
   , defEventName     :: ev -> Text
   , defEventFromName :: Text -> Maybe ev
     -- ^ total: 'Nothing' means the generated event type has no constructor

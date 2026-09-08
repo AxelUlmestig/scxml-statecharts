@@ -62,11 +62,11 @@ unsafeFromConfig def cfg =
 
 -- | Enter the initial state, running entry callbacks and any events they raise.
 start :: Monad m => Def s ev -> Hooks m s ev -> m s
-start def h = unsafeFromConfig def <$> I.start (defIndex def) (toInterp def h)
+start def h = unsafeFromConfig def <$> I.start (defChart def) (toInterp def h)
 
 -- | Deliver one event, staying in the current state when no transition is
 -- enabled for it, which is SCXML's behaviour for an unmatched event.
 stepOrStay :: Monad m => Def s ev -> Hooks m s ev -> s -> ev -> m s
 stepOrStay def h s e =
   maybe s (unsafeFromConfig def)
-    <$> I.macrostep (defIndex def) (toInterp def h) (defToConfig def s) (defEventName def e)
+    <$> I.macrostep (defChart def) (toInterp def h) (defToConfig def s) (defEventName def e)

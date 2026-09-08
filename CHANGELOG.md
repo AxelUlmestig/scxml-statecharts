@@ -16,6 +16,13 @@ First release.
   `<parallel>`. `initial` is required on every compound state and must name a
   direct child; SCXML's "first child in document order" default is not
   supported.
+- The evaluator is a single recursive pass over the tree. Because a transition
+  may only target a sibling, a state only ever rearranges its own children, so
+  there are no least common ancestors, exit-set filters over the whole
+  configuration, or conflicts between transitions at different depths. The
+  derived index is gone, along with lookup by id, parent links and document
+  order. Innermost-wins is now explicit: children are asked first and a state
+  acts only if nothing below it did.
 - A `<final>` state is rejected as a direct region of a `<parallel>`. SCXML
   does not allow it, and it used to report the whole parallel complete before
   the other regions had run.
