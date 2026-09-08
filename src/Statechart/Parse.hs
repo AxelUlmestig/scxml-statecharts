@@ -254,6 +254,12 @@ buildNode el = do
     ("parallel", Just regions) -> do
       when (hasInitial el) $ throwP (label ++ ": <parallel> cannot specify an initial state; every region is entered")
       forM_ regions $ \r ->
+        when (nodeKind r == Final) $
+          throwP $
+            label ++ ": region " ++ T.unpack (nodeId r) ++ " is a <final> state, which SCXML does not allow"
+              ++ " inside <parallel> and which would report the whole <parallel> complete before the other"
+              ++ " regions had run. A region must be a state that can be in progress."
+      forM_ regions $ \r ->
         unless (Map.null (nodeTransitions r)) $
           throwP $
             T.unpack (nodeId r) ++ " is a region of the <parallel> " ++ T.unpack sid

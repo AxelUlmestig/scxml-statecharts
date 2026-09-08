@@ -264,6 +264,8 @@ compatible change, so the defaults are tight.
   be unique across the whole chart, which SCXML requires anyway.
 - **Parsing is strict.** Malformed XML cannot quietly nest one state inside
   another.
+- **A `<final>` may not be a direct region of a `<parallel>`.** SCXML forbids
+  it, and a region must be something that can be in progress.
 - **Not supported yet:** `<history>` states, wildcard event descriptors,
   executable content other than `<script>`, and a `<parallel>` directly inside
   another `<parallel>`, which can almost always be flattened into one.

@@ -16,6 +16,9 @@ First release.
   `<parallel>`. `initial` is required on every compound state and must name a
   direct child; SCXML's "first child in document order" default is not
   supported.
+- A `<final>` state is rejected as a direct region of a `<parallel>`. SCXML
+  does not allow it, and it used to report the whole parallel complete before
+  the other regions had run.
 - The chart is a tree: a state owns its children as `Node`s, and a compound
   state keeps its initial child first, so a dangling child, a disagreeing
   parent and an initial child that is not one of its own are all
