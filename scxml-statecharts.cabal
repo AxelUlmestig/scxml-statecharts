@@ -42,7 +42,7 @@ maintainer:         axel.ulmestig@gmail.com
 copyright:          (c) 2026 Axel Ulmestig
 category:           Control, Language
 build-type:         Simple
-tested-with:        GHC == 9.10.3
+tested-with:        GHC == 9.10.3 || == 9.12.4
 extra-doc-files:
     README.md
     CHANGELOG.md
