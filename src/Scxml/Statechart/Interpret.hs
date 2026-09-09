@@ -11,7 +11,7 @@
 -- A configuration is the set of all active states, ancestors included, as in
 -- SCXML. The typed state generated for a chart is an isomorphic view of a
 -- legal one.
-module Statechart.Interpret
+module Scxml.Statechart.Interpret
   ( Configuration
   , Phase (..)
   , Callbacks (..)
@@ -29,7 +29,7 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 
-import Statechart.Model
+import Scxml.Statechart.Model
 
 type Configuration = Set StateId
 
@@ -38,8 +38,8 @@ data Phase = OnEntry | OnExit
   deriving (Eq, Ord, Show)
 
 -- | How the evaluator reaches the callbacks, in the only terms it knows:
--- state ids and event names. "Statechart.Run" wraps the typed
--- 'Statechart.Run.Hooks' into one of these.
+-- state ids and event names. "Scxml.Statechart.Run" wraps the typed
+-- 'Scxml.Statechart.Run.Hooks' into one of these.
 newtype Callbacks m = Callbacks
   { runCallback :: Phase -> Text -> Configuration -> Maybe Text -> m (Maybe Text)
     -- ^ run the named callback, given the configuration it observes and the

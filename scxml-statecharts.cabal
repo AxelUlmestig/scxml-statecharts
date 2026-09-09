@@ -59,16 +59,16 @@ library
     import:           shared
     hs-source-dirs:   src
     exposed-modules:
-        Statechart
+        Scxml.Statechart
     -- Reachable from generated code, which refers to them by names Template
     -- Haskell resolved at compile time, so they need not be exposed.
     other-modules:
-        Statechart.Def
-        Statechart.Interpret
-        Statechart.Model
-        Statechart.Parse
-        Statechart.Run
-        Statechart.TH
+        Scxml.Statechart.Def
+        Scxml.Statechart.Interpret
+        Scxml.Statechart.Model
+        Scxml.Statechart.Parse
+        Scxml.Statechart.Run
+        Scxml.Statechart.TH
     build-depends:
         base             >=4.18   && <5,
         containers       >=0.6.6  && <0.9,

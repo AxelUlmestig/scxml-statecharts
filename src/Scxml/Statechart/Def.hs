@@ -1,10 +1,10 @@
 -- | The typed chart definition that generated code produces.
-module Statechart.Def (Def (..)) where
+module Scxml.Statechart.Def (Def (..)) where
 
 import Data.Set (Set)
 import Data.Text (Text)
 
-import Statechart.Model (Chart, StateId)
+import Scxml.Statechart.Model (Chart, StateId)
 
 -- | Ties a chart's generated types together with the untyped chart the
 -- interpreter runs. @s@ is the state type and @ev@ the event type. The @scxml@

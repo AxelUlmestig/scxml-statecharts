@@ -26,7 +26,7 @@
 -- @done.state.X@ event, which becomes the constructor @DoneX@. The @name@
 -- attribute on @<scxml>@ is optional metadata, kept in 'chartName' for
 -- logging and persistence; it does not affect the generated names.
-module Statechart.Parse (parseScxml) where
+module Scxml.Statechart.Parse (parseScxml) where
 
 import Control.Monad (ap, forM_, unless, when)
 import Data.Char (isAlphaNum, isUpper)
@@ -42,7 +42,7 @@ import qualified Data.Text.Lazy as TL
 import Text.XML (Element, Name (nameLocalName))
 import qualified Text.XML as X
 
-import Statechart.Model
+import Scxml.Statechart.Model
 
 -- A state+error monad collecting event names in the order they are first
 -- seen. Document order is derived from the tree, so nothing counts here.

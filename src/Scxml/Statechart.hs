@@ -23,6 +23,6 @@
 --
 -- This module exports only the quasiquoter. Everything a chart needs is
 -- generated into your own module, so there is nothing else to import.
-module Statechart (scxml) where
+module Scxml.Statechart (scxml) where
 
-import Statechart.TH (scxml)
+import Scxml.Statechart.TH (scxml)

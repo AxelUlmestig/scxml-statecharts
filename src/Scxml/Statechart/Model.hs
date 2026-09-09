@@ -8,7 +8,7 @@
 -- document index to disagree with the structure. Since a transition may only
 -- target a sibling, every consumer works by walking the tree, so none of that
 -- would have a reader anyway.
-module Statechart.Model
+module Scxml.Statechart.Model
   ( -- * The tree
     StateId
   , Kind (..)

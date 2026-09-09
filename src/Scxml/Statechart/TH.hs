@@ -13,7 +13,7 @@
 --   with one field per compound region; atomic and final states are nullary.
 -- * @data FsmEvent@: one constructor per event name, verbatim, plus @DoneX@
 --   for SCXML's automatic @done.state.X@ completion events.
--- * @fsmChart :: Def FsmState FsmEvent@, for "Statechart.Run".
+-- * @fsmChart :: Def FsmState FsmEvent@, for "Scxml.Statechart.Run".
 -- * @serializeStateMachine :: FsmState -> [Text]@ and
 --   @deserializeStateMachine :: [Text] -> Maybe FsmState@, which store a state
 --   as the set of active state ids and read it back, rejecting anything that
@@ -33,8 +33,8 @@
 --
 -- Every generated type derives @Show@, @Read@, @Eq@ and @Ord@, and the event
 -- type also derives @Enum@ and @Bounded@. For storing a state outside
--- Haskell, prefer 'Statechart.Run.toStateIds' over @Show@.
-module Statechart.TH (scxml) where
+-- Haskell, prefer the generated @serializeStateMachine@ over @Show@.
+module Scxml.Statechart.TH (scxml) where
 
 import Control.Monad (forM, unless)
 import Data.Char (isAlphaNum, isLower, isUpper)
@@ -48,11 +48,11 @@ import Language.Haskell.TH
 import Language.Haskell.TH.Quote
 import Language.Haskell.TH.Syntax (lift)
 
-import Statechart.Def
-import qualified Statechart.Interpret as I
-import Statechart.Model
-import Statechart.Parse
-import qualified Statechart.Run as Run
+import Scxml.Statechart.Def
+import qualified Scxml.Statechart.Interpret as I
+import Scxml.Statechart.Model
+import Scxml.Statechart.Parse
+import qualified Scxml.Statechart.Run as Run
 
 -- | Turns SCXML into a statechart. Usable only at the top level of a module,
 -- where it declares the state and event types and the functions that run the
@@ -61,7 +61,7 @@ import qualified Statechart.Run as Run
 -- > {-# LANGUAGE QuasiQuotes #-}
 -- > module LightSwitch where
 -- >
--- > import Statechart (scxml)
+-- > import Scxml.Statechart (scxml)
 -- >
 -- > [scxml|
 -- > <scxml initial="Off">
