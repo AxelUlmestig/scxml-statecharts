@@ -2,11 +2,12 @@
 # publishes to Hackage when the cabal file's version is one Hackage does not
 # have yet.
 #
-# Publishing needs a HACKAGE_TOKEN repository secret, generated from the
-# account management page on Hackage, and waits for a review on the hackage
-# environment. An upload cannot be undone, so a release takes two deliberate
-# acts: a version bump in the cabal file, and approving the deployment.
-# Merging anything else to main only builds.
+# A merge to main always checks the cabal file's version against Hackage. Only
+# when that version is new does the publish job run, and it then waits for a
+# review on the hackage environment, where the HACKAGE_TOKEN secret lives.
+# An upload cannot be undone, so a release takes two deliberate acts: the
+# version bump, and approving the deployment. Merging anything else only
+# builds, and asks for nothing.
 name: CI
 
 on:
@@ -91,12 +92,79 @@ jobs:
       - name: Build the Haddocks
         run: cabal haddock --haddock-for-hackage
 
-  publish:
-    name: Publish to Hackage
-    # The whole matrix has to be green before this job starts, so the code is
-    # already built and tested by the time anything is uploaded.
+  version-check:
+    name: Check the version against Hackage
+    # The whole matrix has to be green before this runs, so the code is already
+    # built and tested by the time a release is even considered.
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Deliberately outside the hackage environment: this job only reads, and
+    # asking for a review before knowing whether there is anything to release
+    # would mean a prompt on every merge.
+    outputs:
+      publish: ${{ steps.version.outputs.publish }}
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # A version already on Hackage cannot be replaced, so the only question
+      # is whether this one is new. Going backwards is refused as well: that
+      # is a mistake rather than a release. Needs no GHC, only the cabal file.
+      - id: version
+        name: Compare the cabal version with Hackage
+        env:
+          PKG: scxml-statecharts
+        run: |
+          set -euo pipefail
+
+          version=$(awk '/^[Vv]ersion:/ { print $2; exit }' "$PKG.cabal")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "cabal file says $version"
+
+          status=$(curl -sS -o preferred.json -w '%{http_code}' \
+            -H 'Accept: application/json' \
+            "https://hackage.haskell.org/package/$PKG/preferred")
+
+          case "$status" in
+            200) published=$(jq -r '((."normal-version" // []) + (."deprecated-version" // []))[]' preferred.json) ;;
+            404) published='' ;;
+            # Anything else is Hackage having a bad day. Treating that as
+            # "nothing is published" would try to re-upload a live version.
+            *)   echo "::error::Hackage returned HTTP $status"; exit 1 ;;
+          esac
+
+          decide () {
+            echo "publish=$1" >> "$GITHUB_OUTPUT"
+            echo "$2" >> "$GITHUB_STEP_SUMMARY"
+            echo "$2"
+          }
+
+          if [ -z "$published" ]; then
+            decide true "Releasing **$version**. Nothing is published yet, so this is the first release."
+            exit 0
+          fi
+
+          if printf '%s\n' "$published" | grep -Fxq "$version"; then
+            decide false "Nothing to do. **$version** is already on Hackage."
+            exit 0
+          fi
+
+          latest=$(printf '%s\n' "$published" | sort -V | tail -1)
+          if [ "$(printf '%s\n%s\n' "$version" "$latest" | sort -V | tail -1)" = "$version" ]; then
+            decide true "Releasing **$version**. Hackage is at $latest."
+          else
+            echo "::error::cabal file is at $version but Hackage already has $latest"
+            exit 1
+          fi
+
+  publish:
+    name: Publish to Hackage
+    needs: version-check
+    # Evaluated before the environment is consulted, so a merge that changes
+    # no version is skipped outright rather than sitting waiting for a review.
+    if: needs.version-check.outputs.publish == 'true'
     runs-on: ubuntu-latest
     # Holds the job for a review before anything reaches Hackage. The token
     # lives on this environment rather than on the repository, so a run that
@@ -112,60 +180,12 @@ jobs:
           ghc-version: ${{ env.RELEASE_GHC }}
           cabal-version: '3.16.1.0'
 
-      # A version already on Hackage cannot be replaced, so the only question
-      # is whether this one is new. Going backwards is refused as well: that
-      # is a mistake rather than a release.
-      - id: version
-        name: Compare the cabal version with Hackage
-        env:
-          PKG: scxml-statecharts
-        run: |
-          set -euo pipefail
-
-          version=$(awk '/^[Vv]ersion:/ { print $2; exit }' "$PKG.cabal")
-          echo "cabal file says $version"
-
-          status=$(curl -sS -o preferred.json -w '%{http_code}' \
-            -H 'Accept: application/json' \
-            "https://hackage.haskell.org/package/$PKG/preferred")
-
-          case "$status" in
-            200) published=$(jq -r '((."normal-version" // []) + (."deprecated-version" // []))[]' preferred.json) ;;
-            404) published='' ;;
-            # Anything else is Hackage having a bad day. Treating that as
-            # "nothing is published" would try to re-upload a live version.
-            *)   echo "::error::Hackage returned HTTP $status"; exit 1 ;;
-          esac
-
-          if [ -z "$published" ]; then
-            echo "nothing published yet, this is the first release"
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if printf '%s\n' "$published" | grep -Fxq "$version"; then
-            echo "$version is already on Hackage, nothing to do"
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          latest=$(printf '%s\n' "$published" | sort -V | tail -1)
-          if [ "$(printf '%s\n%s\n' "$version" "$latest" | sort -V | tail -1)" = "$version" ]; then
-            echo "publishing $version, Hackage is at $latest"
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::error::cabal file is at $version but Hackage already has $latest"
-            exit 1
-          fi
-
       # A fresh runner, so without this the release rebuilds every dependency
       # the test job just built. Restore only: the test job owns this key.
       - name: Resolve the build plan
-        if: steps.version.outputs.publish == 'true'
         run: cabal build --dry-run --enable-tests
 
       - uses: actions/cache/restore@v6
-        if: steps.version.outputs.publish == 'true'
         with:
           path: |
             ${{ steps.setup.outputs.cabal-store }}
@@ -174,7 +194,6 @@ jobs:
           restore-keys: ${{ runner.os }}-${{ runner.arch }}-ghc${{ env.RELEASE_GHC }}-
 
       - name: Build the release artifacts
-        if: steps.version.outputs.publish == 'true'
         run: |
           set -euo pipefail
           cabal sdist
@@ -184,7 +203,6 @@ jobs:
       # here catches a source file missing from the sdist before the upload
       # makes that permanent.
       - name: Build and test from the sdist
-        if: steps.version.outputs.publish == 'true'
         run: |
           set -euo pipefail
           mkdir -p /tmp/sdist-check
@@ -194,9 +212,9 @@ jobs:
           cabal test --test-show-details=direct
 
       - name: Upload to Hackage
-        if: steps.version.outputs.publish == 'true'
         env:
           HACKAGE_TOKEN: ${{ secrets.HACKAGE_TOKEN }}
+          VERSION: ${{ needs.version-check.outputs.version }}
         run: |
           set -euo pipefail
           if [ -z "${HACKAGE_TOKEN:-}" ]; then
@@ -205,3 +223,4 @@ jobs:
           fi
           cabal upload --publish --token "$HACKAGE_TOKEN" dist-newstyle/sdist/*.tar.gz
           cabal upload --publish --documentation --token "$HACKAGE_TOKEN" dist-newstyle/*-docs.tar.gz
+          echo "Published **$VERSION** to Hackage." >> "$GITHUB_STEP_SUMMARY"
