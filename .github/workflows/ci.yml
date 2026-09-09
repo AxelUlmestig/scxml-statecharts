@@ -3,9 +3,10 @@
 # have yet.
 #
 # Publishing needs a HACKAGE_TOKEN repository secret, generated from the
-# account management page on Hackage. An upload cannot be undone, so the
-# version bump in the cabal file is the deliberate act that triggers a
-# release; merging anything else to main only builds.
+# account management page on Hackage, and waits for a review on the hackage
+# environment. An upload cannot be undone, so a release takes two deliberate
+# acts: a version bump in the cabal file, and approving the deployment.
+# Merging anything else to main only builds.
 name: CI
 
 on:
@@ -16,6 +17,14 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
+  # Only offered for the copy of this file on the default branch, so it
+  # cannot be used to try a workflow out before merging it.
+  workflow_dispatch:
+
+env:
+  # The GHC a release is built with. One of the matrix entries below, so that
+  # the publish job can restore the cache the test job wrote.
+  RELEASE_GHC: '9.10.3'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -79,9 +88,15 @@ jobs:
 
   publish:
     name: Publish to Hackage
+    # The whole matrix has to be green before this job starts, so the code is
+    # already built and tested by the time anything is uploaded.
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # Holds the job for a review before anything reaches Hackage. The token
+    # lives on this environment rather than on the repository, so a run that
+    # is never approved never has credentials.
+    environment: hackage
 
     steps:
       - uses: actions/checkout@v7
@@ -89,7 +104,7 @@ jobs:
       - id: setup
         uses: haskell-actions/setup@v2
         with:
-          ghc-version: '9.10.3'
+          ghc-version: ${{ env.RELEASE_GHC }}
           cabal-version: '3.16.1.0'
 
       # A version already on Hackage cannot be replaced, so the only question
@@ -137,6 +152,21 @@ jobs:
             echo "::error::cabal file is at $version but Hackage already has $latest"
             exit 1
           fi
+
+      # A fresh runner, so without this the release rebuilds every dependency
+      # the test job just built. Restore only: the test job owns this key.
+      - name: Resolve the build plan
+        if: steps.version.outputs.publish == 'true'
+        run: cabal build --dry-run --enable-tests
+
+      - uses: actions/cache/restore@v6
+        if: steps.version.outputs.publish == 'true'
+        with:
+          path: |
+            ${{ steps.setup.outputs.cabal-store }}
+            dist-newstyle
+          key: ${{ runner.os }}-ghc${{ env.RELEASE_GHC }}-${{ hashFiles('dist-newstyle/cache/plan.json') }}
+          restore-keys: ${{ runner.os }}-ghc${{ env.RELEASE_GHC }}-
 
       - name: Build the release artifacts
         if: steps.version.outputs.publish == 'true'
