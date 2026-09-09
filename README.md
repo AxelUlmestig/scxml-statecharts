@@ -276,3 +276,13 @@ compatible change, so the defaults are tight.
 cabal build
 cabal test
 ```
+
+The toolchain comes from a Nix flake. With direnv, `direnv allow` puts GHC
+9.10.3, cabal and haskell-language-server on the path on entering the
+directory; without it, `nix develop`. Two further shells hold the GHCs a
+Hackage or Stackage builder is likely to pick, for checking a release:
+
+```
+nix develop .#ghc9124 --command cabal test
+nix develop .#ghc9141 --command cabal test
+```
