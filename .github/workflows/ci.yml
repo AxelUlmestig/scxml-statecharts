@@ -1,0 +1,207 @@
+# Builds and tests every non-draft pull request, and on a push to main
+# publishes to Hackage when the cabal file's version is one Hackage does not
+# have yet.
+#
+# Publishing needs a HACKAGE_TOKEN repository secret, generated from the
+# account management page on Hackage, and waits for a review on the hackage
+# environment. An upload cannot be undone, so a release takes two deliberate
+# acts: a version bump in the cabal file, and approving the deployment.
+# Merging anything else to main only builds.
+name: CI
+
+on:
+  pull_request:
+    # ready_for_review is here so that taking a pull request out of draft
+    # starts a run; without it a draft that is marked ready sits untested
+    # until its next push.
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  # Only offered for the copy of this file on the default branch, so it
+  # cannot be used to try a workflow out before merging it.
+  workflow_dispatch:
+
+env:
+  # The GHC a release is built with. One of the matrix entries below, so that
+  # the publish job can restore the cache the test job wrote.
+  RELEASE_GHC: '9.10.3'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: GHC ${{ matrix.ghc }}
+    # Draft pull requests are skipped. Pushes to main have no
+    # pull_request object, so the first clause lets them through.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The version tested-with names, plus the one the current Stackage
+        # nightly uses. GHC 9.14 ships template-haskell 2.24, which the cabal
+        # file's upper bound excludes; add it here once that bound is raised.
+        ghc: ['9.10.3', '9.12.4']
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: setup
+        uses: haskell-actions/setup@v2
+        with:
+          ghc-version: ${{ matrix.ghc }}
+          cabal-version: '3.16.1.0'
+
+      # Writing the build plan before the cache step gives us a key that
+      # changes exactly when the resolved dependencies do.
+      - name: Resolve the build plan
+        run: cabal build --dry-run --enable-tests
+
+      # GitHub scopes caches to the branch that wrote them and, failing that,
+      # falls back to the default branch on its own, so this key needs no
+      # branch component: a pull request reads main's cache until it has
+      # written one of its own.
+      #
+      # runner.arch is in the key because runner.os is Linux on both x64 and
+      # arm64 runners. Without it, adding an arm64 entry to the matrix would
+      # have the two architectures share a key and restore each other's
+      # incompatible cabal store.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ${{ steps.setup.outputs.cabal-store }}
+            dist-newstyle
+          key: ${{ runner.os }}-${{ runner.arch }}-ghc${{ matrix.ghc }}-${{ hashFiles('dist-newstyle/cache/plan.json') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-ghc${{ matrix.ghc }}-
+
+      - name: Build
+        run: cabal build --enable-tests
+
+      - name: Test
+        run: cabal test --test-show-details=direct
+
+      - name: Check the package metadata
+        run: cabal check
+
+      - name: Build the Haddocks
+        run: cabal haddock --haddock-for-hackage
+
+  publish:
+    name: Publish to Hackage
+    # The whole matrix has to be green before this job starts, so the code is
+    # already built and tested by the time anything is uploaded.
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Holds the job for a review before anything reaches Hackage. The token
+    # lives on this environment rather than on the repository, so a run that
+    # is never approved never has credentials.
+    environment: hackage
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: setup
+        uses: haskell-actions/setup@v2
+        with:
+          ghc-version: ${{ env.RELEASE_GHC }}
+          cabal-version: '3.16.1.0'
+
+      # A version already on Hackage cannot be replaced, so the only question
+      # is whether this one is new. Going backwards is refused as well: that
+      # is a mistake rather than a release.
+      - id: version
+        name: Compare the cabal version with Hackage
+        env:
+          PKG: scxml-statecharts
+        run: |
+          set -euo pipefail
+
+          version=$(awk '/^[Vv]ersion:/ { print $2; exit }' "$PKG.cabal")
+          echo "cabal file says $version"
+
+          status=$(curl -sS -o preferred.json -w '%{http_code}' \
+            -H 'Accept: application/json' \
+            "https://hackage.haskell.org/package/$PKG/preferred")
+
+          case "$status" in
+            200) published=$(jq -r '((."normal-version" // []) + (."deprecated-version" // []))[]' preferred.json) ;;
+            404) published='' ;;
+            # Anything else is Hackage having a bad day. Treating that as
+            # "nothing is published" would try to re-upload a live version.
+            *)   echo "::error::Hackage returned HTTP $status"; exit 1 ;;
+          esac
+
+          if [ -z "$published" ]; then
+            echo "nothing published yet, this is the first release"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if printf '%s\n' "$published" | grep -Fxq "$version"; then
+            echo "$version is already on Hackage, nothing to do"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          latest=$(printf '%s\n' "$published" | sort -V | tail -1)
+          if [ "$(printf '%s\n%s\n' "$version" "$latest" | sort -V | tail -1)" = "$version" ]; then
+            echo "publishing $version, Hackage is at $latest"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::cabal file is at $version but Hackage already has $latest"
+            exit 1
+          fi
+
+      # A fresh runner, so without this the release rebuilds every dependency
+      # the test job just built. Restore only: the test job owns this key.
+      - name: Resolve the build plan
+        if: steps.version.outputs.publish == 'true'
+        run: cabal build --dry-run --enable-tests
+
+      - uses: actions/cache/restore@v6
+        if: steps.version.outputs.publish == 'true'
+        with:
+          path: |
+            ${{ steps.setup.outputs.cabal-store }}
+            dist-newstyle
+          key: ${{ runner.os }}-${{ runner.arch }}-ghc${{ env.RELEASE_GHC }}-${{ hashFiles('dist-newstyle/cache/plan.json') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-ghc${{ env.RELEASE_GHC }}-
+
+      - name: Build the release artifacts
+        if: steps.version.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          cabal sdist
+          cabal haddock --haddock-for-hackage
+
+      # The tarball, not the working tree, is what Hackage serves. Building it
+      # here catches a source file missing from the sdist before the upload
+      # makes that permanent.
+      - name: Build and test from the sdist
+        if: steps.version.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/sdist-check
+          tar xzf dist-newstyle/sdist/*.tar.gz -C /tmp/sdist-check
+          cd /tmp/sdist-check/*/
+          cabal build --enable-tests
+          cabal test --test-show-details=direct
+
+      - name: Upload to Hackage
+        if: steps.version.outputs.publish == 'true'
+        env:
+          HACKAGE_TOKEN: ${{ secrets.HACKAGE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${HACKAGE_TOKEN:-}" ]; then
+            echo "::error::the HACKAGE_TOKEN secret is not set"
+            exit 1
+          fi
+          cabal upload --publish --token "$HACKAGE_TOKEN" dist-newstyle/sdist/*.tar.gz
+          cabal upload --publish --documentation --token "$HACKAGE_TOKEN" dist-newstyle/*-docs.tar.gz

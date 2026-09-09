@@ -3,3 +3,5 @@ dist-newstyle/
 *.o
 .direnv/
 result
+.claude/settings.local.json
+.claude/worktrees/

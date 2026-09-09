@@ -8,7 +8,7 @@
 -- unused-binding warnings for the generated functions it does not call.
 module Reordered where
 
-import Statechart (scxml)
+import Scxml.Statechart (scxml)
 
 [scxml|
 <scxml initial="Job">

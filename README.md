@@ -17,7 +17,7 @@ A monitor that polls something and reports when it is healthy:
 {-# LANGUAGE QuasiQuotes #-}
 module Monitor where
 
-import Statechart (scxml)
+import Scxml.Statechart (scxml)
 import Control.Monad.Trans.State.Strict (StateT, gets, modify')
 
 [scxml|

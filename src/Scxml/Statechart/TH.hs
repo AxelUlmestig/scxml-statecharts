@@ -13,7 +13,7 @@
 --   with one field per compound region; atomic and final states are nullary.
 -- * @data FsmEvent@: one constructor per event name, verbatim, plus @DoneX@
 --   for SCXML's automatic @done.state.X@ completion events.
--- * @fsmChart :: Def FsmState FsmEvent@, for "Statechart.Run".
+-- * @fsmChart :: Def FsmState FsmEvent@, for "Scxml.Statechart.Run".
 -- * @serializeStateMachine :: FsmState -> [Text]@ and
 --   @deserializeStateMachine :: [Text] -> Maybe FsmState@, which store a state
 --   as the set of active state ids and read it back, rejecting anything that
@@ -33,8 +33,8 @@
 --
 -- Every generated type derives @Show@, @Read@, @Eq@ and @Ord@, and the event
 -- type also derives @Enum@ and @Bounded@. For storing a state outside
--- Haskell, prefer 'Statechart.Run.toStateIds' over @Show@.
-module Statechart.TH (scxml) where
+-- Haskell, prefer the generated @serializeStateMachine@ over @Show@.
+module Scxml.Statechart.TH (scxml) where
 
 import Control.Monad (forM, unless)
 import Data.Char (isAlphaNum, isLower, isUpper)
@@ -48,14 +48,64 @@ import Language.Haskell.TH
 import Language.Haskell.TH.Quote
 import Language.Haskell.TH.Syntax (lift)
 
-import Statechart.Def
-import qualified Statechart.Interpret as I
-import Statechart.Model
-import Statechart.Parse
-import qualified Statechart.Run as Run
+import Scxml.Statechart.Def
+import qualified Scxml.Statechart.Interpret as I
+import Scxml.Statechart.Model
+import Scxml.Statechart.Parse
+import qualified Scxml.Statechart.Run as Run
 
--- | The declaration quasiquoter described in this module's documentation.
--- Usable only at the top level of a module.
+-- | Turns SCXML into a statechart. Usable only at the top level of a module,
+-- where it declares the state and event types and the functions that run the
+-- chart. A light switch, whose two states each announce themselves on entry:
+--
+-- > {-# LANGUAGE QuasiQuotes #-}
+-- > module LightSwitch where
+-- >
+-- > import Scxml.Statechart (scxml)
+-- >
+-- > [scxml|
+-- > <scxml initial="Off">
+-- >   <state id="Off">
+-- >     <onentry><script>report</script></onentry>
+-- >     <transition event="Flip" target="On"/>
+-- >   </state>
+-- >   <state id="On">
+-- >     <onentry><script>report</script></onentry>
+-- >     <transition event="Flip" target="Off"/>
+-- >   </state>
+-- > </scxml>
+-- > |]
+-- >
+-- > report :: FsmState -> Maybe FsmEvent -> IO (Maybe FsmEvent)
+-- > report st _ = print st >> pure Nothing
+--
+-- State ids and event names are used verbatim, so that declares @FsmState@
+-- with constructors @Off@ and @On@, @FsmEvent@ with @Flip@, and:
+--
+-- > initiateStateMachine :: IO FsmState
+-- > notifyStateMachine   :: FsmState -> FsmEvent -> IO FsmState
+--
+-- Callbacks are ordinary functions in the same module, written after the
+-- quasiquote, and are found by the name in @\<script\>@:
+--
+-- > ghci> off <- initiateStateMachine
+-- > Off
+-- > ghci> on <- notifyStateMachine off Flip
+-- > On
+--
+-- The callbacks all share one monad, which the type checker enforces. @IO@ is
+-- enough to print; when a chart has to carry something along, put the
+-- callbacks in a @StateT@ over it and the generated functions follow suit:
+--
+-- > record :: FsmState -> Maybe FsmEvent -> StateT [FsmState] IO (Maybe FsmEvent)
+-- > record st _ = modify (st :) >> pure Nothing
+-- >
+-- > -- initiateStateMachine :: StateT [FsmState] IO FsmState
+-- > -- notifyStateMachine   :: FsmState -> FsmEvent -> StateT [FsmState] IO FsmState
+--
+-- Returning @Just event@ instead of @Nothing@ raises that event, which is how
+-- a callback decides where the chart goes next. The generated names are fixed,
+-- so a module holds one chart.
 scxml :: QuasiQuoter
 scxml =
   QuasiQuoter

@@ -10,7 +10,7 @@ import qualified Data.Text as T
 import System.Exit (exitFailure)
 
 -- The library's entire public API.
-import Statechart (scxml)
+import Scxml.Statechart (scxml)
 import qualified Overrides
 import qualified Reordered
 

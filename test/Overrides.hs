@@ -5,7 +5,7 @@
 module Overrides where
 
 import Control.Monad.Trans.State.Strict (StateT, modify', runStateT)
-import Statechart (scxml)
+import Scxml.Statechart (scxml)
 
 [scxml|
 <scxml initial="Outer">
