@@ -99,6 +99,12 @@ name :: FsmState -> Maybe FsmEvent -> m (Maybe FsmEvent)
 name :: FsmState -> Maybe FsmEvent -> m ()
 ```
 
+The name may equally go in a `src` attribute, `<script src="name"/>`, which is
+where SCXML puts the location of an external script and where the Postgres
+implementation of these charts puts its callbacks. Exactly one of the two, as
+the specification requires: a `<script>` with both a `src` and content is
+rejected rather than one of them quietly winning.
+
 Entry callbacks receive the state being entered, exit callbacks the state being
 left. The event is the one being processed, or `Nothing` during
 `initiateStateMachine`.
@@ -263,7 +269,8 @@ compatible change, so the defaults are tight.
 - **State ids and event names must be Haskell constructor names**, and ids must
   be unique across the whole chart, which SCXML requires anyway.
 - **Parsing is strict.** Malformed XML cannot quietly nest one state inside
-  another.
+  another. XML comments are ignored wherever they appear, so a state can be
+  commented out.
 - **A `<final>` may not be a direct region of a `<parallel>`.** SCXML forbids
   it, and a region must be something that can be in progress.
 - **Not supported yet:** `<history>` states, wildcard event descriptors,

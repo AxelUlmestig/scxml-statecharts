@@ -71,7 +71,10 @@ import qualified Reordered
   </state>
 
   <final id="Completed">
-    <onentry><script>notifyCustomer</script></onentry>
+    <!-- A callback named in src rather than in the content, the spelling the
+         Postgres implementation of these charts uses. One or the other, not
+         both. -->
+    <onentry><script src="notifyCustomer"/></onentry>
   </final>
   <final id="Rejected"/>
   <final id="Cancelled"/>

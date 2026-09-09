@@ -9,6 +9,10 @@ First release.
 - Hierarchy (compound states as sum types), parallel regions (as products),
   `<onentry>` and `<onexit>` callbacks named in the XML, entry callbacks that
   raise events, and SCXML `done.state.X` completion events.
+- A callback is named either in a `<script>`'s content or in its `src`
+  attribute, and rejected if both are given, as the specification requires of
+  them. `src` is the spelling the Postgres implementation of these charts
+  uses; it used to be ignored, silently in the presence of content.
 - Unmatched events leave the state unchanged, as in SCXML.
 - Compile-time validation: strict XML (via `xml-conduit`), state ids, event
   names, callback names, a level rule requiring a transition to target a

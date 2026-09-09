@@ -2,8 +2,10 @@
 --
 -- Supported: @<state>@, @<parallel>@, @<final>@, @<transition>@ (event,
 -- target), @initial@ attributes and @<initial>@ elements, and
--- @<script>@ inside @<onentry>@ and @<onexit>@ whose content is the name of a
--- Haskell function to run.
+-- @<script>@ inside @<onentry>@ and @<onexit>@ naming the Haskell function to
+-- run, either as its content or in a @src@ attribute. XML comments are
+-- ignored wherever they appear, including around a state that is commented
+-- out.
 --
 -- Deliberately unsupported: @cond@ guards, eventless transitions and
 -- transitions without a target (make the decision in an @<onentry>@ callback
@@ -29,7 +31,7 @@
 module Scxml.Statechart.Parse (parseScxml) where
 
 import Control.Monad (ap, forM_, unless, when)
-import Data.Char (isAlphaNum, isUpper)
+import Data.Char (isAlphaNum, isSpace, isUpper)
 import Data.List (group, intercalate, sort, stripPrefix)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import qualified Data.List.NonEmpty as NE
@@ -190,16 +192,33 @@ donePrefix = T.pack "done.state."
 
 -- | The function names in @<script>@ children of an @<onentry>@, @<onexit>@ or
 -- @<transition>@ element, in document order.
+--
+-- The name goes either in the element's content or in its @src@ attribute, and
+-- in exactly one of the two, which is the constraint SCXML puts on them. In
+-- SCXML @src@ holds the location of an external script, so naming a host
+-- function there is as much of a liberty as putting one in the content, and
+-- both spellings are accepted so that one chart can serve two
+-- implementations: the Postgres one writes @\<script src="schema.function"/\>@.
 scriptsOf :: String -> Element -> Either String [Text]
-scriptsOf label el = concat <$> mapM one (elChildren el)
+scriptsOf label el = concat <$> mapM child (elChildren el)
   where
-    one c
-      | localName c == "script" = case words (strContent c) of
-          [name] -> Right [T.pack name]
-          _ -> Left (label ++ ": <script> must contain exactly one Haskell function name, got " ++ show (strContent c))
+    child c
+      | localName c == "script" = callbackOf (attr "src" c) (strContent c)
       | localName c `elem` ["raise", "if", "foreach", "log", "assign", "send", "cancel"] =
           Left (label ++ ": executable content <" ++ localName c ++ "> is not supported; use <script>functionName</script>")
       | otherwise = Right []
+    callbackOf src content = case (src, all isSpace content) of
+      (Just s, True) -> one "src attribute" s
+      (Nothing, False) -> one "content" content
+      (Nothing, True) ->
+        Left (label ++ ": <script> names no callback; write <script>functionName</script> or <script src=\"functionName\"/>")
+      (Just s, False) ->
+        Left $
+          label ++ ": <script> has both a src attribute (" ++ show s ++ ") and content ("
+            ++ show (unwords (words content)) ++ "); the callback is named in one or the other"
+    one what raw = case words raw of
+      [name] -> Right [T.pack name]
+      _ -> Left (label ++ ": <script> " ++ what ++ " must be exactly one Haskell function name, got " ++ show raw)
 
 -- | The child state that entering a compound state (or the @<scxml>@ root)
 -- leads to. Required, exactly one, and a direct child: entering must not
