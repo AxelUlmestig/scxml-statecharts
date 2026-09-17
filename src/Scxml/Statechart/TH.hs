@@ -11,8 +11,9 @@
 --   the state id. A compound state becomes a constructor carrying a sum type
 --   of the same name as the state; a parallel state becomes a constructor
 --   with one field per compound region; atomic and final states are nullary.
--- * @data FsmEvent@: one constructor per event name, verbatim, plus @DoneX@
---   for SCXML's automatic @done.state.X@ completion events.
+-- * @data FsmEvent@: one constructor per event name, verbatim, carrying the
+--   payload types written after the name in the @event@ attribute, plus a
+--   nullary @DoneX@ for SCXML's automatic @done.state.X@ completion events.
 -- * @fsmChart :: Def FsmState FsmEvent@, for "Scxml.Statechart.Run".
 -- * @serializeStateMachine :: FsmState -> [Text]@ and
 --   @deserializeStateMachine :: [Text] -> Maybe FsmState@, which store a state
@@ -32,7 +33,9 @@
 -- @
 --
 -- Every generated type derives @Show@, @Read@, @Eq@ and @Ord@, and the event
--- type also derives @Enum@ and @Bounded@. For storing a state outside
+-- type also derives @Enum@ and @Bounded@ as long as no event carries a
+-- payload: @Ord@ would demand an instance of every payload type, and the
+-- other two need every constructor nullary. For storing a state outside
 -- Haskell, prefer the generated @serializeStateMachine@ over @Show@.
 module Scxml.Statechart.TH (scxml) where
 
@@ -104,8 +107,19 @@ import qualified Scxml.Statechart.Run as Run
 -- > -- notifyStateMachine   :: FsmState -> FsmEvent -> StateT [FsmState] IO FsmState
 --
 -- Returning @Just event@ instead of @Nothing@ raises that event, which is how
--- a callback decides where the chart goes next. The generated names are fixed,
--- so a module holds one chart.
+-- a callback decides where the chart goes next.
+--
+-- An event may carry data, by writing the Haskell types its constructor holds
+-- after its name. @\<transition event="Order Item Int" target="Checking"/\>@
+-- declares @Order Item Int@, and the callbacks of the states that transition
+-- enters receive the value the caller passed in, payload and all. A payload
+-- type is one type constructor, optionally qualified (@Int@,
+-- @Order.LineItem@); like a callback name it is resolved after the
+-- quasiquote, so it may be defined below it. Transitions are still selected
+-- by event name alone, so a payload never decides where the chart goes; that
+-- stays with the events a callback raises.
+--
+-- The generated names are fixed, so a module holds one chart.
 scxml :: QuasiQuoter
 scxml =
   QuasiQuoter
@@ -152,12 +166,24 @@ generate src = do
   -- Events: those named in transitions, in document order, then done events of
   -- states that can complete but that no transition mentions.
   let referenced = chartEvents ch
-      doneEvents = [I.doneEventName (nodeId n) | n <- states, completes n]
-      events = referenced ++ filter (`notElem` referenced) doneEvents
-      eventCon e = case T.stripPrefix (T.pack "done.state.") e of
-        Just sid -> (mkName ("Done" ++ T.unpack sid), "completion event " ++ show (T.unpack e))
-        Nothing -> (mkName (T.unpack e), "event " ++ show (T.unpack e))
-      eventCons = map eventCon events
+      completing = [n | n <- states, completes n]
+      doneEvents = [Event (I.doneEventName (nodeId n)) [] | n <- completing]
+      events = referenced ++ filter ((`notElem` map eventName referenced) . eventName) doneEvents
+      -- (constructor, payload type names, what it came from, wire name)
+      eventInfo e =
+        let name = eventName e
+         in case T.stripPrefix (T.pack "done.state.") name of
+              Just sid -> (mkName ("Done" ++ T.unpack sid), [], "completion event " ++ show (T.unpack name), name)
+              Nothing -> (mkName (T.unpack name), eventFields e, "event " ++ show (T.unpack name), name)
+      eventInfos = map eventInfo events
+      eventCons = [(c, origin) | (c, _, origin, _) <- eventInfos]
+      -- Enum and Bounded need every constructor nullary, and Ord would make
+      -- the whole chart fail to compile over a payload type that has no
+      -- instance, so an event carrying data costs all three.
+      eventDerivs
+        | null eventInfos = [''Show, ''Read, ''Eq, ''Ord]
+        | any (\(_, fs, _, _) -> not (null fs)) eventInfos = [''Show, ''Read, ''Eq]
+        | otherwise = [''Show, ''Read, ''Eq, ''Ord, ''Enum, ''Bounded]
 
   groups <- forM (Nothing : map Just compounds) $ \g -> do
     let ty = maybe stateT (nameFor . nodeId) g
@@ -187,19 +213,31 @@ generate src = do
 
   stateDecs <- concat <$> mapM (groupDecs nameFor groupOf . snd) groups
   eventDec <-
-    dataD (cxt []) eventT [] Nothing [normalC c [] | (c, _) <- eventCons]
-      [derivClause Nothing (map conT (if null eventCons then [''Show, ''Read, ''Eq, ''Ord] else [''Show, ''Read, ''Eq, ''Ord, ''Enum, ''Bounded]))]
+    dataD (cxt []) eventT [] Nothing
+      [ normalC c [bangType (bang noSourceUnpackedness noSourceStrictness) (conT (mkName (T.unpack f))) | f <- fs]
+      | (c, fs, _, _) <- eventInfos
+      ]
+      [derivClause Nothing (map conT eventDerivs)]
 
   let eventNameE
-        | null eventCons = [| \_ -> error "eventName: chart has no events" |]
-        | otherwise = lamCaseE [match (conP c []) (normalB (lift e)) [] | ((c, _), e) <- zip eventCons events]
-      eventFromNameE = do
-        t <- newName "t"
-        lam1E (varP t) $
+        | null eventInfos = [| \_ -> error "eventName: chart has no events" |]
+        | otherwise =
+            lamCaseE
+              [ match (conP c (replicate (length fs) wildP)) (normalB (lift name)) []
+              | (c, fs, _, name) <- eventInfos
+              ]
+      -- Total for every state the interpreter can complete, which is exactly
+      -- the states that got a DoneX constructor.
+      doneEventE = do
+        sid <- newName "sid"
+        lam1E (varP sid) $
           foldr
-            (\((c, _), e) rest -> [| if $(varE t) == $(lift e) then Just $(conE c) else $rest |])
-            [| Nothing |]
-            (zip eventCons events)
+            (\n rest ->
+               [| if $(varE sid) == $(lift (nodeId n))
+                    then $(conE (mkName ("Done" ++ T.unpack (nodeId n))))
+                    else $rest |])
+            [| error ("Statechart: no done.state constructor for " ++ show $(varE sid) ++ "; this is a bug in scxml-statecharts") |]
+            completing
 
   defSig <- sigD defName [t| Def $(conT stateT) $(conT eventT) |]
   defDec <-
@@ -208,7 +246,7 @@ generate src = do
         [| Def
              { defChart = $(lift ch)
              , defEventName = $eventNameE
-             , defEventFromName = $eventFromNameE
+             , defDoneEvent = $doneEventE
              , defToConfig = $(varE (gTo rootGroup))
              , defFromConfig = $(varE (gFrom rootGroup))
              } |])

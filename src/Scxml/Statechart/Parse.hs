@@ -26,6 +26,12 @@
 -- @done.state.X@ event, which becomes the constructor @DoneX@. The @name@
 -- attribute on @<scxml>@ is optional metadata, kept in 'chartName' for
 -- logging and persistence; it does not affect the generated names.
+--
+-- The @event@ attribute names one event and then the Haskell types its
+-- constructor carries: @event="Ok Int"@ declares @Ok Int@. SCXML instead reads
+-- the attribute as a space-separated list of event descriptors, which is the
+-- one place this parser knowingly differs from the spec; two events reaching
+-- one target are written as two @<transition>@ elements.
 module Scxml.Statechart.Parse (parseScxml) where
 
 import Control.Monad (ap, forM_, unless, when)
@@ -44,9 +50,11 @@ import qualified Text.XML as X
 
 import Scxml.Statechart.Model
 
--- A state+error monad collecting event names in the order they are first
--- seen. Document order is derived from the tree, so nothing counts here.
-newtype P a = P {runP :: [Text] -> Either String (a, [Text])}
+-- A state+error monad collecting events in the order they are first seen,
+-- each with the state that declared it so a later disagreement about its
+-- payload can point back. Document order is derived from the tree, so nothing
+-- counts here.
+newtype P a = P {runP :: [(Event, String)] -> Either String (a, [(Event, String)])}
 
 instance Functor P where
   fmap f (P g) = P $ \st -> fmap (\(a, st') -> (f a, st')) (g st)
@@ -64,9 +72,26 @@ throwP msg = P $ \_ -> Left msg
 liftE :: Either String a -> P a
 liftE = either throwP pure
 
--- | Record an event name at its first occurrence in the document.
-seeEvent :: Text -> P ()
-seeEvent e = P $ \seen -> Right ((), if e `elem` seen then seen else seen ++ [e])
+-- | Record an event at its first occurrence in the document. Every transition
+-- naming an event reaches the same generated constructor, so a second one has
+-- to agree about the payload.
+seeEvent :: String -> Event -> P ()
+seeEvent label e = P $ \seen ->
+  case [d | d <- seen, eventName (fst d) == eventName e] of
+    [] -> Right ((), seen ++ [(e, label)])
+    (prev, declaredOn) : _
+      | eventFields prev == eventFields e -> Right ((), seen)
+      | otherwise ->
+          Left $
+            label ++ ": the event " ++ show (T.unpack (eventName e)) ++ " carries "
+              ++ describeEvent e ++ " here and " ++ describeEvent prev ++ " on " ++ declaredOn
+              ++ ". Every transition naming an event reaches the same constructor, so they must agree"
+
+-- | An event's payload, for error messages.
+describeEvent :: Event -> String
+describeEvent e
+  | null (eventFields e) = "nothing"
+  | otherwise = unwords (map T.unpack (eventFields e))
 
 -- | Parse and validate an SCXML document. The 'Left' case is a message meant
 -- to be shown to whoever wrote the XML; the quasiquoter reports it as a
@@ -76,7 +101,7 @@ parseScxml src = do
   root <- parseXml src
   unless (localName root == "scxml") $
     Left ("root element must be <scxml>, found <" ++ localName root ++ ">")
-  (kids, events) <- runP (mapM buildNode (stateChildren root)) []
+  (kids, declared) <- runP (mapM buildNode (stateChildren root)) []
   rootKids <- case NE.nonEmpty kids of
     Just ks -> Right ks
     Nothing -> Left "<scxml> contains no states"
@@ -87,7 +112,7 @@ parseScxml src = do
         Chart
           { chartName = T.pack <$> attr "name" root
           , chartRoot = ordered
-          , chartEvents = events
+          , chartEvents = map fst declared
           }
   validate ch
   pure ch
@@ -180,9 +205,30 @@ allowedChildren =
 
 -- | Ids, event names and the chart name become Haskell constructors verbatim.
 checkConName :: String -> String -> Either String ()
-checkConName what raw = case raw of
-  c : cs | isUpper c && all (\x -> isAlphaNum x || x == '_' || x == '\'') cs -> Right ()
-  _ -> Left (what ++ " " ++ show raw ++ " must be a Haskell constructor name (start with an upper-case letter, then letters, digits, _ or ')")
+checkConName what raw
+  | isConName raw = Right ()
+  | otherwise = Left (what ++ " " ++ show raw ++ " must be a Haskell constructor name (start with an upper-case letter, then letters, digits, _ or ')")
+
+-- | An upper-case Haskell identifier, which a constructor, a type and a
+-- module all are.
+isConName :: String -> Bool
+isConName str = case str of
+  c : cs -> isUpper c && all (\x -> isAlphaNum x || x == '_' || x == '\'') cs
+  [] -> False
+
+-- | A payload type is written as a Haskell type constructor, optionally
+-- module-qualified. Nothing more elaborate fits: the @event@ attribute
+-- separates fields by spaces, so @Maybe Int@ cannot be told apart from two
+-- fields @Maybe@ and @Int@. A type alias covers the rest.
+checkTypeName :: String -> String -> Either String ()
+checkTypeName what raw
+  | all isConName (map T.unpack (T.splitOn (T.pack ".") (T.pack raw))) = Right ()
+  | otherwise =
+      Left $
+        what ++ " " ++ show raw ++ " must be a Haskell type name, optionally module-qualified"
+          ++ " (Int, Text, Order.LineItem). A type variable, or a type built with an application,"
+          ++ " a list or a tuple, cannot be written here, because the event attribute separates"
+          ++ " fields by spaces; give it a type alias and name that"
 
 -- | The prefix of SCXML's automatic completion events.
 donePrefix :: Text
@@ -295,26 +341,29 @@ buildChildren label el = go (elChildren el)
       | localName c == "transition" = do
           t <- buildTransition label c
           (ts, ns) <- go rest
-          pure (t ++ ts, ns)
+          pure (t : ts, ns)
       | localName c `elem` ["state", "parallel", "final", "history"] = do
           n <- buildNode c
           (ts, ns) <- go rest
           pure (ts, n : ns)
       | otherwise = go rest
 
--- | The (event, target) pairs one @<transition>@ element contributes. SCXML
--- allows several event names on one element, which is only shorthand for
--- several transitions with the same target.
-buildTransition :: String -> Element -> P [(Text, StateId)]
+-- | The (event, target) pair one @<transition>@ element contributes. The
+-- @event@ attribute holds the event name followed by the Haskell types its
+-- constructor carries, so @event="Ok Int"@ declares @Ok Int@ and
+-- @event="Ok"@ declares @Ok@. Two events reaching one target are two
+-- @<transition>@ elements.
+buildTransition :: String -> Element -> P (Text, StateId)
 buildTransition label el = do
-  let events = maybe [] words (attr "event" el)
+  let evWords = maybe [] words (attr "event" el)
       targets = map T.pack (maybe [] words (attr "target" el))
   when (attr "cond" el /= Nothing) $
     throwP (label ++ ": cond is not supported; make the decision in an <onentry> callback that raises an event instead")
   unless (null (childrenNamed ["script"] el)) $
     throwP (label ++ ": <script> on a transition is not supported; put it in the <onentry> of the target, which receives the triggering event")
-  when (null events) $
-    throwP (label ++ ": transition without an event; eventless transitions are not supported, raise an event from a callback instead")
+  (name, fields) <- case evWords of
+    [] -> throwP (label ++ ": transition without an event; eventless transitions are not supported, raise an event from a callback instead")
+    (n : fs) -> pure (n, fs)
   target <- case targets of
     [t] -> pure t
     [] -> throwP (label ++ ": transition without a target; to act on an event without leaving the state, target the state itself")
@@ -328,14 +377,23 @@ buildTransition label el = do
     Just "internal" ->
       throwP (label ++ ": type=\"internal\" is not supported; it can only differ from an external transition for a target inside the source, which is not allowed")
     Just other -> throwP (label ++ ": unknown transition type " ++ show other)
-  forM_ events $ \e ->
-    when ('*' `elem` e) $
-      throwP (label ++ ": wildcard event descriptor " ++ show e ++ " is not supported")
-  forM_ events $ \e -> case stripPrefix (T.unpack donePrefix) e of
-    Just inner -> liftE (checkConName (label ++ " done.state event state") inner)
-    Nothing -> liftE (checkConName (label ++ " event") e)
-  mapM_ (seeEvent . T.pack) events
-  pure [(T.pack e, target) | e <- events]
+  when ('*' `elem` name) $
+    throwP (label ++ ": wildcard event descriptor " ++ show name ++ " is not supported")
+  ev <- case stripPrefix (T.unpack donePrefix) name of
+    Just inner -> do
+      liftE (checkConName (label ++ " done.state event state") inner)
+      unless (null fields) $
+        throwP $
+          label ++ ": " ++ show name ++ " cannot carry a payload; the chart raises its own"
+            ++ " done.state events, so there is nowhere for one to come from"
+      pure (Event (T.pack name) [])
+    Nothing -> do
+      liftE (checkConName (label ++ " event") name)
+      forM_ fields $ \f ->
+        liftE (checkTypeName (label ++ " event " ++ show name ++ " payload type") f)
+      pure (Event (T.pack name) (map T.pack fields))
+  seeEvent label ev
+  pure (eventName ev, target)
 
 -- | One transition per event, so selection never has to break a tie.
 transitionMap :: String -> [(Text, StateId)] -> Either String (Map.Map Text StateId)

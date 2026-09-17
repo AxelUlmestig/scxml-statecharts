@@ -13,6 +13,7 @@ module Scxml.Statechart.Model
     StateId
   , Kind (..)
   , Node (..)
+  , Event (..)
   , Chart (..)
   , nodeChildren
   , childrenOfKind
@@ -58,11 +59,22 @@ data Node = Node
   }
   deriving (Eq, Show, Lift)
 
+-- | An event a transition names, with the payload its constructor carries.
+-- The fields are Haskell type names, written after the event name in the
+-- @event@ attribute, and are empty for an event that carries nothing. Every
+-- transition naming an event must declare the same fields for it, since they
+-- all reach the one generated constructor.
+data Event = Event
+  { eventName   :: Text
+  , eventFields :: [Text] -- ^ type names, in order; empty for a bare event
+  }
+  deriving (Eq, Show, Lift)
+
 -- | A whole chart. This is what the quasiquoter lifts into the generated code.
 data Chart = Chart
   { chartName   :: Maybe Text
   , chartRoot   :: NonEmpty Node -- ^ children of @<scxml>@; the first is entered
-  , chartEvents :: [Text]        -- ^ every event a transition names, in document order
+  , chartEvents :: [Event]       -- ^ every event a transition names, in document order
   }
   deriving (Eq, Show, Lift)
 

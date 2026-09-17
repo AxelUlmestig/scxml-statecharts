@@ -37,13 +37,22 @@ type Configuration = Set StateId
 data Phase = OnEntry | OnExit
   deriving (Eq, Ord, Show)
 
--- | How the evaluator reaches the callbacks, in the only terms it knows:
--- state ids and event names. "Scxml.Statechart.Run" wraps the typed
+-- | How the evaluator reaches the callbacks, and everything it needs to know
+-- about the event type to do so. "Scxml.Statechart.Run" wraps the typed
 -- 'Scxml.Statechart.Run.Hooks' into one of these.
-newtype Callbacks m = Callbacks
-  { runCallback :: Phase -> Text -> Configuration -> Maybe Text -> m (Maybe Text)
+--
+-- The evaluator selects transitions by name and never looks inside an event,
+-- but it carries the event itself from the caller through to the callbacks,
+-- so an event may hold a payload the chart knows nothing about.
+data Callbacks m ev = Callbacks
+  { runCallback :: Phase -> Text -> Configuration -> Maybe ev -> m (Maybe ev)
     -- ^ run the named callback, given the configuration it observes and the
     -- event being processed ('Nothing' during 'start'); returns an event to raise
+  , eventNameOf :: ev -> Text
+    -- ^ the name a transition matches on
+  , doneEvent :: StateId -> ev
+    -- ^ the event a state raises on completing, which the evaluator
+    -- synthesises rather than receiving, and which therefore carries nothing
   }
 
 -- | The event SCXML raises when a state completes.
@@ -53,11 +62,12 @@ doneEventName s = T.pack "done.state." <> s
 -- Entering ------------------------------------------------------------------
 
 -- | The result of entering a state: its subtree's configuration, the states
--- entered with the done events each entry implies, and whether the subtree is
--- now in a final state.
+-- entered with the states each entry completes, and whether the subtree is
+-- now in a final state. A completed state is carried as its id, since the
+-- event it raises is built by 'doneEvent' only when it reaches the queue.
 data Entered = Entered
   { enConfig  :: Configuration
-  , enEntered :: [(Node, [Text])] -- ^ outermost first
+  , enEntered :: [(Node, [StateId])] -- ^ outermost first
   , enFinal   :: Bool
   }
 
@@ -68,7 +78,7 @@ completing parent target e
   | nodeKind target /= Final = e
   | otherwise = e {enEntered = attach (enEntered e), enFinal = True}
   where
-    attach ((h, ds) : rest) = (h, ds ++ [doneEventName parent]) : rest
+    attach ((h, ds) : rest) = (h, ds ++ [parent]) : rest
     attach [] = []
 
 -- | Enter a state and everything default entry into it implies.
@@ -86,7 +96,7 @@ enter n = case nodeKind n of
   Parallel rs ->
     let belows = fmap enter rs
         allFinal = all enFinal belows
-        dones = [doneEventName (nodeId n) | allFinal]
+        dones = [nodeId n | allFinal]
      in Entered
           { enConfig = Set.insert (nodeId n) (Set.unions (fmap enConfig (NE.toList belows)))
           , enEntered = (n, dones) : concatMap enEntered (NE.toList belows)
@@ -130,7 +140,7 @@ data Reply = Reply
     -- children.
   , rpConfig :: Configuration -- ^ meaningful only when 'rpMove' is 'Nothing'
   , rpExited :: [Node] -- ^ innermost first
-  , rpEntered :: [(Node, [Text])] -- ^ outermost first
+  , rpEntered :: [(Node, [StateId])] -- ^ outermost first
   , rpConsumed :: Bool
   , rpFinal :: Bool
   }
@@ -197,7 +207,7 @@ offer cfg ev n = case nodeKind n of
             , rpExited = concatMap rpExited (NE.toList belows)
             , rpEntered =
                 concatMap rpEntered (NE.toList belows)
-                  ++ [(n, [doneEventName (nodeId n)]) | justCompleted]
+                  ++ [(n, [nodeId n]) | justCompleted]
             , rpConsumed = True
             , rpFinal = allFinal
             }
@@ -220,7 +230,7 @@ inFinalState cfg n = case nodeKind n of
 -- Running -------------------------------------------------------------------
 
 -- | Enter the chart's initial state, then process whatever that raises.
-start :: Monad m => Chart -> Callbacks m -> m Configuration
+start :: Monad m => Chart -> Callbacks m ev -> m Configuration
 start ch cbs = do
   let entered = enter (NE.head (chartRoot ch))
       cfg = enConfig entered
@@ -228,7 +238,7 @@ start ch cbs = do
   runToCompletion ch cbs cfg raised
 
 -- | Process one external event. 'Nothing' if no transition was enabled for it.
-macrostep :: Monad m => Chart -> Callbacks m -> Configuration -> Text -> m (Maybe Configuration)
+macrostep :: Monad m => Chart -> Callbacks m ev -> Configuration -> ev -> m (Maybe Configuration)
 macrostep ch cbs cfg ev = do
   r <- microstep ch cbs cfg ev
   case r of
@@ -237,7 +247,7 @@ macrostep ch cbs cfg ev = do
 
 -- | Process raised events in order until the queue is empty. One that no
 -- transition handles is dropped.
-runToCompletion :: Monad m => Chart -> Callbacks m -> Configuration -> [Text] -> m Configuration
+runToCompletion :: Monad m => Chart -> Callbacks m ev -> Configuration -> [ev] -> m Configuration
 runToCompletion ch cbs = go (0 :: Int)
   where
     go _ cfg [] = pure cfg
@@ -251,12 +261,12 @@ runToCompletion ch cbs = go (0 :: Int)
 
 -- | One event, one pass. The chart root behaves as a compound state: exactly
 -- one of its children is active, and it has no transitions of its own.
-microstep :: Monad m => Chart -> Callbacks m -> Configuration -> Text -> m (Maybe (Configuration, [Text]))
+microstep :: Monad m => Chart -> Callbacks m ev -> Configuration -> ev -> m (Maybe (Configuration, [ev]))
 microstep ch cbs cfg ev =
   case activeChild cfg (chartRoot ch) of
     Nothing -> pure Nothing
     Just active ->
-      let below = offer cfg ev active
+      let below = offer cfg (eventNameOf cbs ev) active
        in if not (rpConsumed below)
             then pure Nothing
             else do
@@ -270,15 +280,15 @@ microstep ch cbs cfg ev =
               pure (Just (cfg', raised))
 
 -- | Exit callbacks see the state being left, so they get the old configuration.
-runExits :: Monad m => Callbacks m -> Configuration -> Text -> Node -> m ()
+runExits :: Monad m => Callbacks m ev -> Configuration -> ev -> Node -> m ()
 runExits cbs cfg ev n =
   mapM_ (\a -> runCallback cbs OnExit a cfg (Just ev)) (nodeOnExit n)
 
 -- | Entry callbacks see the configuration the step settles in, so they all get
 -- the new one even though they run outermost first.
-runEntries :: Monad m => Callbacks m -> Configuration -> Maybe Text -> [(Node, [Text])] -> m [Text]
+runEntries :: Monad m => Callbacks m ev -> Configuration -> Maybe ev -> [(Node, [StateId])] -> m [ev]
 runEntries cbs cfg ev = fmap concat . mapM one
   where
     one (n, dones) = do
       raised <- mapM (\a -> runCallback cbs OnEntry a cfg ev) (nodeOnEntry n)
-      pure ([r | Just r <- raised] ++ dones)
+      pure ([r | Just r <- raised] ++ map (doneEvent cbs) dones)

@@ -55,3 +55,17 @@ First release.
   without regions are all unrepresentable rather than merely rejected.
 - `Show`/`Read` on every generated type, and `toStateIds`/`fromStateIds` for
   storing a state outside Haskell as the SCXML configuration.
+- Events can carry data: the `event` attribute names one event and then the
+  Haskell types its constructor holds, so `event="Order Item Int"` declares
+  `Order Item Int`. The event reaching a callback is the one the caller
+  passed in rather than a value rebuilt from its name, so the payload
+  survives, and an event a callback raises carries its own. Transitions are
+  still selected by event name alone, so a payload never decides where the
+  chart goes.
+  A payload type is one type constructor, optionally qualified, resolved after
+  the quasiquote like a callback name; `Maybe Int` and `[Int]` go through a
+  type alias. Every transition naming an event must declare the same payload,
+  and `done.state.X` events carry nothing. An event that carries data costs
+  `FsmEvent` its derived `Ord`, `Enum` and `Bounded`.
+  This ends the SCXML shorthand where `event="A B"` meant two transitions with
+  one target; write two `<transition>` elements instead.
