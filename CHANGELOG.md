@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0.0 -- unreleased
+## 0.2.0.0 -- 2026-09-17
 
 - **Breaking.** The `event` attribute now names one event and then the Haskell
   types its constructor holds, so `event="Order Items Int"` declares
