@@ -16,7 +16,9 @@ import Scxml.Statechart (scxml)
 <scxml initial="Idle">
   <state id="Idle">
     <onentry><script>arrive</script></onentry>
-    <transition event="Order Item Int" target="Checking"/>
+    <!-- Items is a type alias: a list cannot be written in the attribute,
+         which separates one payload field from the next by a space. -->
+    <transition event="Order Items Int" target="Checking"/>
   </state>
 
   <state id="Checking">
@@ -40,7 +42,7 @@ import Scxml.Statechart (scxml)
     <onentry><script>note</script></onentry>
     <!-- The same event again, declared with the same payload. Both
          transitions reach the one Order constructor. -->
-    <transition event="Order Item Int" target="Checking"/>
+    <transition event="Order Items Int" target="Checking"/>
   </state>
 </scxml>
 |]
@@ -49,7 +51,7 @@ import Scxml.Statechart (scxml)
 --
 --   data FsmState = Idle | Checking | Shipping Shipping | Refused
 --   data Shipping = Packing | Sent
---   data FsmEvent = Order Item Int | Ok | Reject Reason | Ship Text
+--   data FsmEvent = Order Items Int | Ok | Reject Reason | Ship Text
 --                 | DoneShipping
 --
 -- An event carries data, so FsmEvent derives Show, Read and Eq only: Enum and
@@ -66,6 +68,9 @@ notifyStateMachine :: FsmState -> FsmEvent -> M FsmState
 newtype Item = Item Text
   deriving (Show, Read, Eq)
 
+-- A payload type is one type constructor, so a list gets a name of its own.
+type Items = [Item]
+
 newtype Reason = Reason Text
   deriving (Show, Read, Eq)
 
@@ -75,12 +80,14 @@ arrive _ ev = do
   pure Nothing
 
 check _ ev = case ev of
-  Just (Order (Item what) n)
+  Just (Order items n)
     | n > 0 -> do
-        say ("checking " <> T.pack (show n) <> " x " <> what)
+        say ("checking " <> T.pack (show n) <> " x " <> named items)
         pure (Just Ok)
-    | otherwise -> pure (Just (Reject (Reason ("nothing ordered of " <> what))))
+    | otherwise -> pure (Just (Reject (Reason ("nothing ordered of " <> named items))))
   _ -> pure (Just (Reject (Reason "no order")))
+  where
+    named items = T.intercalate " + " [what | Item what <- items]
 
 note _ ev = do
   say (case ev of Just (Reject (Reason why)) -> "refused: " <> why; _ -> "refused")
@@ -99,10 +106,10 @@ run evs = runStateT (initiateStateMachine >>= go evs) []
 -- | Checks to run, as (label, expected, actual) triples.
 spec :: IO [(String, String, String)]
 spec = do
-  (accepted, acceptedLog) <- run [Order (Item "book") 2]
-  (refused, refusedLog) <- run [Order (Item "book") 0]
-  (shipped, shippedLog) <- run [Order (Item "book") 2, Ship "trk-1"]
-  (again, _) <- run [Order (Item "book") 0, Order (Item "pen") 1]
+  (accepted, acceptedLog) <- run [Order [Item "book"] 2]
+  (refused, refusedLog) <- run [Order [Item "book"] 0]
+  (shipped, shippedLog) <- run [Order [Item "book"] 2, Ship "trk-1"]
+  (again, _) <- run [Order [Item "book"] 0, Order [Item "pen"] 1]
   pure
     [ ("a payload reaches the entry callback of the state the event causes"
       , show ["idle after start", "checking 2 x book" :: Text]
@@ -129,8 +136,8 @@ spec = do
       , show again
       )
     , ("an event shows and reads back with its payload"
-      , show (Order (Item "book") 2)
-      , show (read (show (Order (Item "book") 2)) :: FsmEvent)
+      , show (Order [Item "book"] 2)
+      , show (read (show (Order [Item "book"] 2)) :: FsmEvent)
       )
     , ("the state type is unaffected by payloads"
       , show ["Packing", "Shipping" :: Text]

@@ -227,7 +227,7 @@ checkTypeName what raw
       Left $
         what ++ " " ++ show raw ++ " must be a Haskell type name, optionally module-qualified"
           ++ " (Int, Text, Order.LineItem). A type variable, or a type built with an application,"
-          ++ " a list or a tuple, cannot be written here, because the event attribute separates"
+          ++ " a list, a tuple or a function arrow, cannot be written here, because the event attribute separates"
           ++ " fields by spaces; give it a type alias and name that"
 
 -- | The prefix of SCXML's automatic completion events.
@@ -379,6 +379,16 @@ buildTransition label el = do
     Just other -> throwP (label ++ ": unknown transition type " ++ show other)
   when ('*' `elem` name) $
     throwP (label ++ ": wildcard event descriptor " ++ show name ++ " is not supported")
+  -- A type written with brackets is cut at the spaces inside it, so by the
+  -- time the pieces reach checkTypeName they are meaningless. Catch it on the
+  -- attribute, where the whole type is still there to show.
+  forM_ (attr "event" el) $ \raw ->
+    when (any (`elem` "()[],") raw) $
+      throwP $
+        label ++ ": the event attribute " ++ show raw ++ " writes a type with parentheses,"
+          ++ " brackets or a comma. The attribute holds an event name and then one type"
+          ++ " constructor per payload field, separated by spaces, so there is nowhere for"
+          ++ " those to go: name the type yourself (type Items = [Item]) and write that"
   ev <- case stripPrefix (T.unpack donePrefix) name of
     Just inner -> do
       liftE (checkConName (label ++ " done.state event state") inner)
