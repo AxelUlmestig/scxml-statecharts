@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               scxml-statecharts
-version:            0.1.0.0
+version:            0.2.0.0
 synopsis:           Typed statecharts from SCXML, via Template Haskell
 description:
     Define a statechart (<https://statecharts.dev/>) in SCXML inside a Haskell
