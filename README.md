@@ -101,7 +101,8 @@ name :: FsmState -> Maybe FsmEvent -> m ()
 
 Entry callbacks receive the state being entered, exit callbacks the state being
 left. The event is the one being processed, or `Nothing` during
-`initiateStateMachine`.
+`initiateStateMachine`. It is the event the caller passed in, so whatever
+payload it carries arrives with it.
 
 Returning `Just event` raises it, which is SCXML's `<raise>`. Raised events are
 queued and processed before `notifyStateMachine` returns. This is how branching
@@ -118,6 +119,57 @@ at the generated call site, so one `MonadIO m` callback makes both generated
 functions require `MonadIO`, while a `Monad m` callback keeps its own weaker
 signature and stays usable elsewhere. Declaring the weakest constraint each
 callback needs is therefore still worth it.
+
+## Events that carry data
+
+The `event` attribute holds the event name and then the Haskell types its
+constructor carries:
+
+```xml
+<state id="Idle">
+  <transition event="Order Item Int" target="Checking"/>
+</state>
+```
+
+That declares `Order Item Int` in `FsmEvent`, and the payload reaches the
+callbacks of the states the transition enters:
+
+```haskell
+check :: FsmState -> Maybe FsmEvent -> m (Maybe FsmEvent)
+check _ (Just (Order (Item what) n))
+  | n > 0     = pure (Just Ok)
+  | otherwise = pure (Just (Reject (Reason ("nothing ordered of " <> what))))
+check _ _     = pure (Just (Reject (Reason "no order")))
+```
+
+Selection is still by name alone: a payload never decides which transition
+fires, which is the same rule as the missing `cond` and keeps the routing
+readable from the chart. A decision that depends on the data is a state whose
+entry callback raises one of the events leading out of it, and that raised
+event may carry data of its own.
+
+A payload belongs to its event rather than to the step. An event a callback
+raises carries its data to the callbacks that event reaches, but a
+`done.state` event raised afterwards is a different event and carries nothing.
+
+A few things to know:
+
+- **Payload types are written as one type constructor**, optionally qualified:
+  `Int`, `Data.Text.Text`, `Order.LineItem`. `Maybe Int`, `[Int]` and
+  `(Int, Int)` cannot be written directly, because the attribute separates one
+  field from the next by a space; give them a type alias and name that. Like
+  callback names, the types are resolved after the quasiquote, so they may be
+  defined below it.
+- **Every transition naming an event must declare the same payload**, since
+  they all reach the one constructor. Disagreeing declarations are a compile
+  error naming both.
+- **`done.state.X` events carry nothing.** The chart raises them itself, so
+  there is nowhere for a payload to come from.
+- **An event that carries data costs `FsmEvent` its derived `Ord`, `Enum` and
+  `Bounded`.** `Ord` would demand an instance of every payload type, and the
+  other two need every constructor nullary. A chart whose events carry nothing
+  derives all of them as before. `Show`, `Read` and `Eq` are always derived,
+  so payload types need them.
 
 ## Semantics
 
@@ -252,8 +304,11 @@ compatible change, so the defaults are tight.
   because it makes the entry point depend on the order children happen to be
   written in.
 - **One transition per state per event**, held as a map from event name to
-  target, so nothing has to break a tie. `event="A B"` is still shorthand for
-  two transitions to the same target.
+  target, so nothing has to break a tie. The `event` attribute names one event
+  and then the types its constructor carries, which is the one place this
+  knowingly differs from the specification: SCXML reads the attribute as a
+  space-separated list of event descriptors. Two events reaching one target
+  are two `<transition>` elements.
 - **`done.state.X` may only be handled on `X` itself.** Since a transition
   also targets a sibling, completion climbs one level at a time: a state that
   finishes moves to a `<final>` sibling, which completes their parent and

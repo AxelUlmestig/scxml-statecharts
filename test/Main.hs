@@ -12,6 +12,7 @@ import System.Exit (exitFailure)
 -- The library's entire public API.
 import Scxml.Statechart (scxml)
 import qualified Overrides
+import qualified Payloads
 import qualified Reordered
 
 -- An order process: compound states, a parallel state that completes via
@@ -24,9 +25,10 @@ import qualified Reordered
 <scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" name="order-v1" initial="Draft">
   <state id="Draft">
     <transition event="Submit" target="Validating"/>
-    <!-- Several event names on one element is shorthand for several
-         transitions with the same target. -->
-    <transition event="Discard Abandon" target="Cancelled"/>
+    <!-- Two events reaching one target are two transitions: the event
+         attribute holds one event name and then its payload types. -->
+    <transition event="Discard" target="Cancelled"/>
+    <transition event="Abandon" target="Cancelled"/>
   </state>
 
   <state id="Validating">
@@ -259,7 +261,7 @@ main = do
   check "a self-transition re-enters without moving" (Processing Authorizing) stayed
   viaDiscard <- stepFrom (shopWith ["book"]) Draft Discard
   viaAbandon <- stepFrom (shopWith ["book"]) Draft Abandon
-  check "several events on one transition all reach its target"
+  check "separate transitions to one target both reach it"
     (Cancelled, Cancelled) (viaDiscard, viaAbandon)
   check "all events, in document order"
     [ Submit, Discard, Abandon, Valid, Invalid, Poll, PaymentAuthorized, Packed
@@ -287,7 +289,8 @@ main = do
   -- A second chart, in its own module since the generated names are fixed.
   reordered <- Reordered.spec
   overrides <- Overrides.spec
-  mapM_ (\(label, expected, actual) -> check label expected actual) (reordered ++ overrides)
+  payloads <- Payloads.spec
+  mapM_ (\(label, expected, actual) -> check label expected actual) (reordered ++ overrides ++ payloads)
 
   n <- readIORef failures
   when (n > 0) exitFailure

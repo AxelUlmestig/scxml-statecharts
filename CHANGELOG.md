@@ -1,6 +1,41 @@
 # Changelog
 
-## 0.1.0.0 -- unreleased
+## 0.2.0.0 -- 2026-09-17
+
+- **Breaking.** The `event` attribute now names one event and then the Haskell
+  types its constructor holds, so `event="Order Items Int"` declares
+  `Order Items Int`. SCXML reads the attribute as a space-separated list of
+  event descriptors, and that shorthand is gone: `event="A B"` no longer means
+  two transitions with one target, which is written as two `<transition>`
+  elements instead. This is the one place the parser knowingly differs from
+  the specification.
+- The event reaching a callback is now the one the caller passed in rather
+  than a value rebuilt from its name, so whatever payload it carries survives
+  the trip, and an event a callback raises carries its own. The evaluator is
+  parameterised over the event type and still selects transitions by name
+  alone, so a payload never decides where the chart goes; that stays with the
+  events a callback raises. `Def` trades `defEventFromName :: Text -> Maybe ev`
+  for a total `defDoneEvent :: StateId -> ev`, since `done.state` events are
+  the only ones the evaluator synthesises and they carry nothing.
+- A payload type is one type constructor, optionally module-qualified,
+  resolved after the quasiquote like a callback name, so it may be defined
+  below it. `Maybe Int`, `[Int]` and tuples cannot be told apart from separate
+  fields in an attribute whose parts are separated by spaces, so they go
+  through a type alias; writing one directly is rejected with a message naming
+  the way in. Allowing them later is a compatible change.
+- Every transition naming an event must declare the same payload for it, since
+  they all reach the one generated constructor, and a disagreement is a
+  compile error naming both places.
+- **Breaking.** An event that carries data costs `FsmEvent` its derived `Ord`,
+  `Enum` and `Bounded`: `Ord` would demand an instance of every payload type,
+  and the other two need every constructor nullary. A chart whose events carry
+  nothing derives all of them as before.
+- The Nix dev shell gained zlib, which `xml-conduit` reaches through
+  `conduit-extra` and `streaming-commons`. Without it `cabal build` compiled
+  everything and then failed at the link with `cannot find -lz`, and every
+  Template Haskell splice warned about `libz.so`.
+
+## 0.1.0.0 -- 2026-09-09
 
 First release.
 

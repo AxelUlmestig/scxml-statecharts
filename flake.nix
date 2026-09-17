@@ -14,10 +14,28 @@
 
       # cabal-install is a tool rather than a library, so one build of it serves
       # every compiler below.
+      #
+      # zlib is a C library rather than a Haskell one: xml-conduit reaches it
+      # through conduit-extra and streaming-commons, and the Haskell zlib
+      # package it ends up building links against it. Without it in the shell,
+      # cabal compiles everything and then fails at the link with
+      # "ld.gold: cannot find -lz".
       shellFor = { compiler, tools ? [ ] }:
         pkgs.mkShell {
           name = "scxml-statecharts-${compiler}";
-          buildInputs = [ pkgs.haskell.packages.${compiler}.ghc pkgs.cabal-install ] ++ tools;
+          buildInputs = [
+            pkgs.haskell.packages.${compiler}.ghc
+            pkgs.cabal-install
+            pkgs.zlib
+          ] ++ tools;
+
+          # Linking finds libz through buildInputs, but GHC's own runtime
+          # linker does not: it loads the zlib package whenever it loads the
+          # package, which is every repl session and every module with a
+          # Template Haskell splice, and it looks on LD_LIBRARY_PATH.
+          shellHook = ''
+            export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.zlib ]}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          '';
         };
 
       # Only the default compiler has a cached haskell-language-server. Asking

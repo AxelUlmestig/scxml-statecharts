@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               scxml-statecharts
-version:            0.1.0.0
+version:            0.2.0.0
 synopsis:           Typed statecharts from SCXML, via Template Haskell
 description:
     Define a statechart (<https://statecharts.dev/>) in SCXML inside a Haskell
@@ -30,8 +30,13 @@ description:
     @done.state@ completion events are supported. @cond@ guards and eventless
     transitions are deliberately not: a decision becomes a state whose entry
     callback raises one of the events leading out of it, which keeps the
-    branching visible in the chart. See the README for the full mapping and
-    the list of unsupported SCXML features.
+    branching visible in the chart.
+
+    An event can carry data, by naming the Haskell types its constructor holds
+    after it: @event="Order Item Int"@ declares @Order Item Int@, and the
+    callbacks of the states that transition enters receive the value with its
+    payload. Transitions are still selected by event name alone. See the
+    README for the full mapping and the list of unsupported SCXML features.
 
 homepage:           https://github.com/AxelUlmestig/scxml-statecharts
 bug-reports:        https://github.com/AxelUlmestig/scxml-statecharts/issues
@@ -83,6 +88,7 @@ test-suite spec
     main-is:          Main.hs
     other-modules:    Reordered
                       Overrides
+                      Payloads
     build-depends:
         base              >=4.18  && <5,
         scxml-statecharts,

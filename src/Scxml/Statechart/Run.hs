@@ -40,19 +40,15 @@ entryAction = id
 exitAction :: m () -> m ()
 exitAction = id
 
-toInterp :: Monad m => Def s ev -> Hooks m s ev -> I.Callbacks m
+-- | The event reaching a callback is the one the caller passed in, not a value
+-- rebuilt from its name, so whatever payload it carries survives the trip.
+toInterp :: Def s ev -> Hooks m s ev -> I.Callbacks m ev
 toInterp def h =
-  I.Callbacks $ \phase name cfg ev ->
-    fmap (defEventName def) <$> runAction h phase name (unsafeFromConfig def cfg) (typedEvent def <$> ev)
-
--- | The generator emits a constructor for every event name the interpreter can
--- produce, including a @done.state@ event for every state that can complete,
--- so this cannot fail for a chart the quasiquoter built.
-typedEvent :: Def s ev -> Text -> ev
-typedEvent def t =
-  fromMaybe
-    (error ("Statechart: no constructor for the event " ++ show (T.unpack t) ++ "; this is a bug in scxml-statecharts"))
-    (defEventFromName def t)
+  I.Callbacks
+    { I.runCallback = \phase name cfg ev -> runAction h phase name (unsafeFromConfig def cfg) ev
+    , I.eventNameOf = defEventName def
+    , I.doneEvent = defDoneEvent def
+    }
 
 unsafeFromConfig :: Def s ev -> Set.Set StateId -> s
 unsafeFromConfig def cfg =
@@ -69,4 +65,4 @@ start def h = unsafeFromConfig def <$> I.start (defChart def) (toInterp def h)
 stepOrStay :: Monad m => Def s ev -> Hooks m s ev -> s -> ev -> m s
 stepOrStay def h s e =
   maybe s (unsafeFromConfig def)
-    <$> I.macrostep (defChart def) (toInterp def h) (defToConfig def s) (defEventName def e)
+    <$> I.macrostep (defChart def) (toInterp def h) (defToConfig def s) e
