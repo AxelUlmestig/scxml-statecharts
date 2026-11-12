@@ -22,10 +22,11 @@ import Scxml.Statechart.Model (StateId)
 
 -- | How to run the callbacks named in @<script>@ elements.
 newtype Hooks m s ev = Hooks
-  { runAction :: Phase -> Text -> s -> Maybe ev -> m (Maybe ev)
-    -- ^ run the named callback with the state it observes (the state being
-    -- left for 'OnExit', the state being entered otherwise) and the event
-    -- being processed ('Nothing' during 'start'); returns an event to raise
+  { runAction :: Phase -> Text -> Maybe (s, ev) -> s -> m (Maybe ev)
+    -- ^ run the named callback with the state the step leaves and the event
+    -- that caused it ('Nothing' during 'start'), and the state the step
+    -- settles in. Exit and entry callbacks see the same step. Returns an
+    -- event to raise.
   }
 
 -- | Marks an entry callback, which returns the event it raises, if any.
@@ -45,7 +46,10 @@ exitAction = id
 toInterp :: Def s ev -> Hooks m s ev -> I.Callbacks m ev
 toInterp def h =
   I.Callbacks
-    { I.runCallback = \phase name cfg ev -> runAction h phase name (unsafeFromConfig def cfg) ev
+    { I.runCallback = \phase name cause cfg' ->
+        runAction h phase name
+          (fmap (\(cfg, ev) -> (unsafeFromConfig def cfg, ev)) cause)
+          (unsafeFromConfig def cfg')
     , I.eventNameOf = defEventName def
     , I.doneEvent = defDoneEvent def
     }

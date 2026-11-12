@@ -14,6 +14,10 @@
 -- * @data FsmEvent@: one constructor per event name, verbatim, carrying the
 --   payload types written after the name in the @event@ attribute, plus a
 --   nullary @DoneX@ for SCXML's automatic @done.state.X@ completion events.
+-- * @data FsmTransition@: the step a callback runs in, a record of
+--   @transitionFrom :: Maybe FsmState@, @transitionEvent :: Maybe FsmEvent@
+--   and @transitionTo :: FsmState@. The first two are 'Nothing' only while
+--   @initiateStateMachine@ enters the initial state.
 -- * @fsmChart :: Def FsmState FsmEvent@, for "Scxml.Statechart.Run".
 -- * @serializeStateMachine :: FsmState -> [Text]@ and
 --   @deserializeStateMachine :: [Text] -> Maybe FsmState@, which store a state
@@ -28,14 +32,15 @@
 -- initiateStateMachine :: m FsmState
 -- notifyStateMachine   :: FsmState -> FsmEvent -> m FsmState
 --
--- entryCallback :: FsmState -> Maybe FsmEvent -> m (Maybe FsmEvent)
--- exitCallback  :: FsmState -> Maybe FsmEvent -> m ()
+-- entryCallback :: FsmTransition -> m (Maybe FsmEvent)
+-- exitCallback  :: FsmTransition -> m ()
 -- @
 --
--- Every generated type derives @Show@, @Read@, @Eq@ and @Ord@, and the event
--- type also derives @Enum@ and @Bounded@ as long as no event carries a
+-- Every generated state type derives @Show@, @Read@, @Eq@ and @Ord@, and the
+-- event type also derives @Enum@ and @Bounded@ as long as no event carries a
 -- payload: @Ord@ would demand an instance of every payload type, and the
--- other two need every constructor nullary. For storing a state outside
+-- other two need every constructor nullary. @FsmTransition@ derives @Show@,
+-- @Read@ and @Eq@, which every event type has. For storing a state outside
 -- Haskell, prefer the generated @serializeStateMachine@ over @Show@.
 module Scxml.Statechart.TH (scxml) where
 
@@ -79,8 +84,8 @@ import qualified Scxml.Statechart.Run as Run
 -- > </scxml>
 -- > |]
 -- >
--- > report :: FsmState -> Maybe FsmEvent -> IO (Maybe FsmEvent)
--- > report st _ = print st >> pure Nothing
+-- > report :: FsmTransition -> IO (Maybe FsmEvent)
+-- > report step = print (transitionTo step) >> pure Nothing
 --
 -- State ids and event names are used verbatim, so that declares @FsmState@
 -- with constructors @Off@ and @On@, @FsmEvent@ with @Flip@, and:
@@ -89,7 +94,11 @@ import qualified Scxml.Statechart.Run as Run
 -- > notifyStateMachine   :: FsmState -> FsmEvent -> IO FsmState
 --
 -- Callbacks are ordinary functions in the same module, written after the
--- quasiquote, and are found by the name in @\<script\>@:
+-- quasiquote, and are found by the name in @\<script\>@. Each receives an
+-- @FsmTransition@ describing the step it runs in: the state left, the event
+-- that caused the step, and the state the step settles in. Entry and exit
+-- callbacks see the same record, and the first two fields are 'Nothing' only
+-- while @initiateStateMachine@ enters the initial state:
 --
 -- > ghci> off <- initiateStateMachine
 -- > Off
@@ -100,8 +109,8 @@ import qualified Scxml.Statechart.Run as Run
 -- enough to print; when a chart has to carry something along, put the
 -- callbacks in a @StateT@ over it and the generated functions follow suit:
 --
--- > record :: FsmState -> Maybe FsmEvent -> StateT [FsmState] IO (Maybe FsmEvent)
--- > record st _ = modify (st :) >> pure Nothing
+-- > record :: FsmTransition -> StateT [FsmState] IO (Maybe FsmEvent)
+-- > record step = modify (transitionTo step :) >> pure Nothing
 -- >
 -- > -- initiateStateMachine :: StateT [FsmState] IO FsmState
 -- > -- notifyStateMachine   :: FsmState -> FsmEvent -> StateT [FsmState] IO FsmState
@@ -111,8 +120,8 @@ import qualified Scxml.Statechart.Run as Run
 --
 -- An event may carry data, by writing the Haskell types its constructor holds
 -- after its name. @\<transition event="Order Item Int" target="Checking"/\>@
--- declares @Order Item Int@, and the callbacks of the states that transition
--- enters receive the value the caller passed in, payload and all. A payload
+-- declares @Order Item Int@, and the callbacks that transition runs receive
+-- the value the caller passed in, payload and all, as @transitionEvent@. A payload
 -- type is one type constructor, optionally qualified (@Int@,
 -- @Order.LineItem@); like a callback name it is resolved after the
 -- quasiquote, so it may be defined below it. Transitions are still selected
@@ -148,6 +157,10 @@ generate src = do
   let states = chartStates ch
   let stateT = mkName "FsmState"
       eventT = mkName "FsmEvent"
+      transitionT = mkName "FsmTransition"
+      fromField = mkName "transitionFrom"
+      eventField = mkName "transitionEvent"
+      toField = mkName "transitionTo"
       defName = mkName "fsmChart"
       startName = mkName "initiateStateMachine"
       stepName = mkName "notifyStateMachine"
@@ -206,9 +219,9 @@ generate src = do
         | n <- concatMap (gChildren . snd) groups
         ]
       typeNames =
-        [(stateT, "the state type"), (eventT, "the event type")]
+        [(stateT, "the state type"), (eventT, "the event type"), (transitionT, "the transition type")]
           ++ [(gType grp, "compound state " ++ show (T.unpack (nodeId n))) | (Just n, grp) <- groups]
-  checkClashes "constructor" (stateCons ++ eventCons)
+  checkClashes "constructor" ((transitionT, "the transition type") : stateCons ++ eventCons)
   checkClashes "type" typeNames
 
   stateDecs <- concat <$> mapM (groupDecs nameFor groupOf . snd) groups
@@ -218,6 +231,18 @@ generate src = do
       | (c, fs, _, _) <- eventInfos
       ]
       [derivClause Nothing (map conT eventDerivs)]
+  -- What every callback receives. A record rather than positional arguments,
+  -- so a callback names what it reads and ignores the rest.
+  transitionDec <- do
+    let field n t = varBangType n (bangType (bang noSourceUnpackedness noSourceStrictness) t)
+    dataD (cxt []) transitionT [] Nothing
+      [ recC transitionT
+          [ field fromField [t| Maybe $(conT stateT) |]
+          , field eventField [t| Maybe $(conT eventT) |]
+          , field toField (conT stateT)
+          ]
+      ]
+      [derivClause Nothing (map conT [''Show, ''Read, ''Eq])]
 
   let eventNameE
         | null eventInfos = [| \_ -> error "eventName: chart has no events" |]
@@ -261,9 +286,15 @@ generate src = do
   let hooksE = do
         phase <- newName "_phase"
         name <- newName "_name"
-        st <- newName "_st"
-        ev <- newName "_ev"
-        let call fn = [| $(varE (mkName (T.unpack fn))) $(varE st) $(varE ev) |]
+        cause <- newName "_cause"
+        to <- newName "_to"
+        let step =
+              recConE transitionT
+                [ (,) fromField <$> [| fmap fst $(varE cause) |]
+                , (,) eventField <$> [| fmap snd $(varE cause) |]
+                , (,) toField <$> varE to
+                ]
+            call fn = [| $(varE (mkName (T.unpack fn))) $step |]
             entryChain =
               foldr (\fn rest -> [| if $(varE name) == $(lift fn) then Run.entryAction $(call fn) else $rest |])
                     [| pure Nothing |] entryActions
@@ -274,7 +305,7 @@ generate src = do
           [ match (conP 'Run.OnExit []) (normalB [| $exitChain >> pure Nothing |]) []
           , match (conP 'Run.OnEntry []) (normalB entryChain) []
           ]
-        [| Run.Hooks $(lamE [varP phase, varP name, varP st, varP ev] (pure body)) |]
+        [| Run.Hooks $(lamE [varP phase, varP name, varP cause, varP to] (pure body)) |]
   startDec <- valD (varP startName) (normalB [| Run.start $(varE defName) $hooksE |]) []
   stepDec <- do
     st <- newName "st"
@@ -304,7 +335,7 @@ generate src = do
                    _ -> Nothing |]
     funD fromIdsName [clause [varP ids] (normalB body) []]
 
-  pure (stateDecs ++ [eventDec, defSig, defDec, startDec, stepDec, toIdsSig, toIdsDec, fromIdsSig, fromIdsDec])
+  pure (stateDecs ++ [eventDec, transitionDec, defSig, defDec, startDec, stepDec, toIdsSig, toIdsDec, fromIdsSig, fromIdsDec])
 
 -- | Data type plus configuration conversions for one compound-like node.
 groupDecs :: (StateId -> Name) -> (StateId -> Q Group) -> Group -> Q [Dec]

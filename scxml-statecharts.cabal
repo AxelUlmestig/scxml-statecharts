@@ -34,8 +34,7 @@ description:
 
     An event can carry data, by naming the Haskell types its constructor holds
     after it: @event="Order Item Int"@ declares @Order Item Int@, and the
-    callbacks of the states that transition enters receive the value with its
-    payload. Transitions are still selected by event name alone. See the
+    callbacks that transition runs receive the value with its payload. Transitions are still selected by event name alone. See the
     README for the full mapping and the list of unsupported SCXML features.
 
 homepage:           https://github.com/AxelUlmestig/scxml-statecharts

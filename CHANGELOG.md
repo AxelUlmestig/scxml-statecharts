@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- **Breaking.** A callback now takes one argument, a generated `FsmTransition`
+  record of the state the step leaves (`transitionFrom`), the event that
+  caused it (`transitionEvent`) and the state it settles in (`transitionTo`),
+  instead of a state and a `Maybe FsmEvent`. A callback could previously see
+  only one end of the step: an entry callback where the chart was going, an
+  exit callback where it had been. Now both see the whole step, and the same
+  record. `transitionFrom` and `transitionEvent` are `Nothing` only while
+  `initiateStateMachine` enters the initial state. A step caused by a raised
+  event leaves the state the previous step settled in. Migrating is
+  mechanical: `cb st ev` becomes `cb step`, with `transitionTo step` for an
+  entry callback's state, `transitionFrom step` for an exit callback's (always `Just` there), and
+  `transitionEvent step` for the event.
+- `FsmTransition` and its three fields are generated into the chart's module
+  next to the other generated names, so a module defining any of them no
+  longer compiles, and a state id `FsmTransition` is rejected as a clash.
+
 ## 0.2.0.0 -- 2026-09-17
 
 - **Breaking.** The `event` attribute now names one event and then the Haskell

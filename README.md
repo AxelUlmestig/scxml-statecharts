@@ -49,12 +49,12 @@ notifyStateMachine :: FsmState -> FsmEvent -> StateT Monitor IO FsmState
 
 -- The callbacks named in <script>. They must share one monad, and the type
 -- checker enforces it.
-fetchStatus, sendReport :: FsmState -> Maybe FsmEvent -> StateT Monitor IO (Maybe FsmEvent)
-fetchStatus _ _ = gets (\m -> Just (if healthy m then Ok else Failed))
-sendReport _ _ = modify' (\m -> m {reports = reports m + 1}) >> pure (Just Done)
+fetchStatus, sendReport :: FsmTransition -> StateT Monitor IO (Maybe FsmEvent)
+fetchStatus _ = gets (\m -> Just (if healthy m then Ok else Failed))
+sendReport _ = modify' (\m -> m {reports = reports m + 1}) >> pure (Just Done)
 
-recordRun :: FsmState -> Maybe FsmEvent -> StateT Monitor IO ()
-recordRun _ _ = modify' (\m -> m {runs = runs m + 1})
+recordRun :: FsmTransition -> StateT Monitor IO ()
+recordRun _ = modify' (\m -> m {runs = runs m + 1})
 ```
 
 The quasiquote generates:
@@ -63,6 +63,11 @@ The quasiquote generates:
 data FsmState = Idle | Polling Polling
 data Polling  = Fetching | Reporting
 data FsmEvent = Check | Ok | Done | Failed
+data FsmTransition = FsmTransition
+  { transitionFrom  :: Maybe FsmState  -- the state the step leaves
+  , transitionEvent :: Maybe FsmEvent  -- the event that caused it
+  , transitionTo    :: FsmState        -- the state it settles in
+  }
 
 initiateStateMachine    -- enter the initial state, running its entry callbacks
 notifyStateMachine      -- deliver one event
@@ -94,15 +99,24 @@ function defined in the same module, after the quasiquote:
 
 ```haskell
 -- onentry: may decide where to go next by raising an event
-name :: FsmState -> Maybe FsmEvent -> m (Maybe FsmEvent)
+name :: FsmTransition -> m (Maybe FsmEvent)
 -- onexit: cleanup only, enforced by the generated code
-name :: FsmState -> Maybe FsmEvent -> m ()
+name :: FsmTransition -> m ()
 ```
 
-Entry callbacks receive the state being entered, exit callbacks the state being
-left. The event is the one being processed, or `Nothing` during
-`initiateStateMachine`. It is the event the caller passed in, so whatever
-payload it carries arrives with it.
+Every callback receives the step it runs in as an `FsmTransition`: the state
+the step leaves (`transitionFrom`), the event that caused it
+(`transitionEvent`) and the state it settles in (`transitionTo`). Entry and
+exit callbacks of one step see the same record, so an exit callback knows where
+the chart is going and an entry callback where it came from. The event is the
+one the caller passed in, so whatever payload it carries arrives with it.
+
+`transitionFrom` and `transitionEvent` are `Nothing` only during
+`initiateStateMachine`, which enters the initial state without leaving one.
+A step caused by a raised event leaves the state the previous step settled
+in, so a callback sees the step it is part of rather than the whole call to
+`notifyStateMachine`. Both are full states rather than the one being entered
+or exited, which a callback can find with `case`.
 
 Returning `Just event` raises it, which is SCXML's `<raise>`. Raised events are
 queued and processed before `notifyStateMachine` returns. This is how branching
@@ -132,14 +146,15 @@ constructor carries:
 ```
 
 That declares `Order Item Int` in `FsmEvent`, and the payload reaches the
-callbacks of the states the transition enters:
+callbacks the transition runs:
 
 ```haskell
-check :: FsmState -> Maybe FsmEvent -> m (Maybe FsmEvent)
-check _ (Just (Order (Item what) n))
-  | n > 0     = pure (Just Ok)
-  | otherwise = pure (Just (Reject (Reason ("nothing ordered of " <> what))))
-check _ _     = pure (Just (Reject (Reason "no order")))
+check :: FsmTransition -> m (Maybe FsmEvent)
+check step = case transitionEvent step of
+  Just (Order (Item what) n)
+    | n > 0     -> pure (Just Ok)
+    | otherwise -> pure (Just (Reject (Reason ("nothing ordered of " <> what))))
+  _ -> pure (Just (Reject (Reason "no order")))
 ```
 
 Selection is still by name alone: a payload never decides which transition

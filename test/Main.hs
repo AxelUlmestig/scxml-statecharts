@@ -87,6 +87,9 @@ import qualified Reordered
 --   data Processing = Authorizing | Fulfilment Shipping Invoicing | Fulfilled
 --   data Shipping   = Packing | Shipped
 --   data Invoicing  = Unpaid | Settled
+--   data FsmTransition = FsmTransition
+--     { transitionFrom :: Maybe FsmState, transitionEvent :: Maybe FsmEvent
+--     , transitionTo :: FsmState }
 --   data FsmEvent   = Submit | Discard | Abandon | Valid | Invalid | Poll
 --                   | PaymentAuthorized | Packed | Paid | DoneFulfilment
 --                   | PaymentDeclined | DoneProcessing | Cancel
@@ -109,40 +112,47 @@ type M = StateT Shop IO
 initiateStateMachine :: M FsmState
 notifyStateMachine :: FsmState -> FsmEvent -> M FsmState
 
--- Callbacks named in the SCXML. Entry callbacks return m (Maybe FsmEvent),
--- raising an event with Just; exit callbacks return m (). All in one monad,
--- or it does not compile.
+-- Callbacks named in the SCXML. Each receives the FsmTransition it runs in.
+-- Entry callbacks return m (Maybe FsmEvent), raising an event with Just; exit
+-- callbacks return m (). All in one monad, or it does not compile.
 
 -- | A choice state's entry callback: decide by raising an event.
-validate :: FsmState -> Maybe FsmEvent -> M (Maybe FsmEvent)
-validate _ _ = do
+validate :: FsmTransition -> M (Maybe FsmEvent)
+validate _ = do
   ok <- gets (not . null . items)
   pure (Just (if ok then Valid else Invalid))
 
 -- | Poll something on entry; move on immediately if it is already settled.
 -- Re-entered by the Poll self-transition, which is how polling replaces a
 -- transition script.
-checkPrepayment :: FsmState -> Maybe FsmEvent -> M (Maybe FsmEvent)
-checkPrepayment _ _ = do
+checkPrepayment :: FsmTransition -> M (Maybe FsmEvent)
+checkPrepayment _ = do
   say "checked prepayment"
   paid <- gets prepaid
   pure (if paid then Just PaymentAuthorized else Nothing)
 
 -- Entry callbacks that raise nothing still say so, with pure Nothing.
-reserveStock, notifyCustomer :: FsmState -> Maybe FsmEvent -> M (Maybe FsmEvent)
-reserveStock _ _ = do
+reserveStock, notifyCustomer :: FsmTransition -> M (Maybe FsmEvent)
+reserveStock _ = do
   n <- gets (length . items)
   modify' (\s -> s {reserved = n})
   say "reserved stock"
   pure Nothing
--- Entry callbacks see the state entered and the event that caused it.
-notifyCustomer s ev = do
-  say ("notified customer: " <> tshow s <> " after " <> maybe "start" tshow ev)
+-- Entry callbacks see the state left, the event that caused the step, and
+-- the state entered.
+notifyCustomer step = do
+  say ("notified customer: " <> describe step)
   pure Nothing
 
--- Exit callbacks see the state being left, and cannot raise.
-releaseStock :: FsmState -> Maybe FsmEvent -> M ()
-releaseStock s _ = modify' (\s' -> s' {reserved = 0}) >> say ("released stock leaving " <> tshow s)
+-- Exit callbacks see the same step, and cannot raise.
+releaseStock :: FsmTransition -> M ()
+releaseStock step = modify' (\s' -> s' {reserved = 0}) >> say ("released stock: " <> describe step)
+
+describe :: FsmTransition -> Text
+describe step =
+  maybe "start" tshow (transitionFrom step)
+    <> " --" <> maybe "start" tshow (transitionEvent step)
+    <> "--> " <> tshow (transitionTo step)
 
 say :: Text -> M ()
 say t = modify' (\s -> s {log_ = log_ s ++ [t]})
@@ -184,8 +194,8 @@ main = do
   check "callbacks in order, with state and event"
     [ "reserved stock"
     , "checked prepayment"
-    , "released stock leaving Processing Fulfilled"
-    , "notified customer: Completed after DoneProcessing"
+    , "released stock: Processing Fulfilled --DoneProcessing--> Completed"
+    , "notified customer: Processing Fulfilled --DoneProcessing--> Completed"
     ]
     (log_ shop)
   check "release resets the reservation" 0 (reserved shop)
@@ -229,7 +239,8 @@ main = do
   (end3, shop3) <- runEvents (shopWith ["book"]) [Submit, PaymentAuthorized, Packed, Cancel]
   check "cancel from inside Fulfilment" Cancelled end3
   check "cancel releases stock"
-    ["reserved stock", "checked prepayment", "released stock leaving Processing (Fulfilment Shipped Unpaid)"]
+    [ "reserved stock", "checked prepayment"
+    , "released stock: Processing (Fulfilment Shipped Unpaid) --Cancel--> Cancelled" ]
     (log_ shop3)
 
   -- An event with no transition in the current state is ignored: same state,
@@ -237,7 +248,7 @@ main = do
   (end4, shop4) <- runEvents (shopWith ["book"]) [Submit, Packed, Paid, Cancel, Cancel]
   check "unhandled events leave the state alone" Cancelled end4
   check "unhandled events run nothing"
-    ["reserved stock", "checked prepayment", "released stock leaving Processing Authorizing"]
+    ["reserved stock", "checked prepayment", "released stock: Processing Authorizing --Cancel--> Cancelled"]
     (log_ shop4)
 
   -- An entry callback raising an event: processed before the step returns.
