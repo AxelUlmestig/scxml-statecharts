@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0.0 -- 2026-11-13
 
 - **Breaking.** A callback now takes one argument describing the step it runs
   in, instead of a state and a `Maybe FsmEvent`, and could previously see only
