@@ -31,10 +31,12 @@ import Scxml.Statechart (scxml)
 initiateStateMachine :: StateT [String] IO FsmState
 notifyStateMachine :: FsmState -> FsmEvent -> StateT [String] IO FsmState
 
-noteEntry, raiseYes, raiseNo :: FsmState -> Maybe FsmEvent -> StateT [String] IO (Maybe FsmEvent)
-noteEntry _ _ = modify' (++ ["entered Middle"]) >> pure Nothing
-raiseYes _ _ = modify' (++ ["raising Yes"]) >> pure (Just Yes)
-raiseNo _ _ = modify' (++ ["raising No"]) >> pure (Just No)
+noteEntry, raiseYes, raiseNo :: FsmEntry -> StateT [String] IO (Maybe FsmEvent)
+-- A record field per thing the step has, so a callback reads only what it uses.
+noteEntry (FsmStart s) = modify' (++ ["entered " ++ show s ++ " at start"]) >> pure Nothing
+noteEntry (FsmStep step) = modify' (++ ["entered " ++ show (transitionTo step) ++ " from " ++ show (transitionFrom step)]) >> pure Nothing
+raiseYes _ = modify' (++ ["raising Yes"]) >> pure (Just Yes)
+raiseNo _ = modify' (++ ["raising No"]) >> pure (Just No)
 
 -- | Checks to run, as (label, expected, actual) triples.
 spec :: IO [(String, String, String)]
@@ -48,7 +50,7 @@ spec = do
   pure
     [ ("an inner transition overrides the enclosing default", show (Outer Yeah), show afterPoke)
     , ("every entry callback runs, in document order"
-      , show ["entered Middle", "raising Yes", "raising No"]
+      , show ["entered Outer Middle from Outer Inner", "raising Yes", "raising No"]
       , show lg
       )
     , ("the enclosing default applies where nothing inner handles the event"

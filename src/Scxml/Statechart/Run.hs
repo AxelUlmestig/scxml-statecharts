@@ -3,7 +3,6 @@
 -- callbacks named in the SCXML.
 module Scxml.Statechart.Run
   ( Hooks (..)
-  , Phase (..)
   , entryAction
   , exitAction
   , start
@@ -17,15 +16,17 @@ import qualified Data.Text as T
 
 import Scxml.Statechart.Def
 import qualified Scxml.Statechart.Interpret as I
-import Scxml.Statechart.Interpret (Phase (..))
 import Scxml.Statechart.Model (StateId)
 
 -- | How to run the callbacks named in @<script>@ elements.
-newtype Hooks m s ev = Hooks
-  { runAction :: Phase -> Text -> s -> Maybe ev -> m (Maybe ev)
-    -- ^ run the named callback with the state it observes (the state being
-    -- left for 'OnExit', the state being entered otherwise) and the event
-    -- being processed ('Nothing' during 'start'); returns an event to raise
+data Hooks m s ev = Hooks
+  { runEntry :: Text -> Maybe (s, ev) -> s -> m (Maybe ev)
+    -- ^ run the named entry callback with the state the step leaves and the
+    -- event that caused it ('Nothing' during 'start'), and the state the
+    -- step settles in. Returns an event to raise.
+  , runExit :: Text -> s -> ev -> s -> m ()
+    -- ^ run the named exit callback with the state the step leaves, the
+    -- event that caused it and the state it settles in
   }
 
 -- | Marks an entry callback, which returns the event it raises, if any.
@@ -43,26 +44,32 @@ exitAction = id
 -- | The event reaching a callback is the one the caller passed in, not a value
 -- rebuilt from its name, so whatever payload it carries survives the trip.
 toInterp :: Def s ev -> Hooks m s ev -> I.Callbacks m ev
-toInterp def h =
+toInterp def@Def {defEventName, defDoneEvent} Hooks {runEntry, runExit} =
   I.Callbacks
-    { I.runCallback = \phase name cfg ev -> runAction h phase name (unsafeFromConfig def cfg) ev
-    , I.eventNameOf = defEventName def
-    , I.doneEvent = defDoneEvent def
+    { I.runEntry = \name cause cfg' ->
+        runEntry name
+          (fmap (\(cfg, ev) -> (state cfg, ev)) cause)
+          (state cfg')
+    , I.runExit = \name cfg ev cfg' -> runExit name (state cfg) ev (state cfg')
+    , I.eventNameOf = defEventName
+    , I.doneEvent = defDoneEvent
     }
+  where
+    state = unsafeFromConfig def
 
 unsafeFromConfig :: Def s ev -> Set.Set StateId -> s
-unsafeFromConfig def cfg =
+unsafeFromConfig Def {defFromConfig} cfg =
   fromMaybe
     (error ("Statechart: interpreter produced an invalid configuration: " ++ show (map T.unpack (Set.toList cfg))))
-    (defFromConfig def cfg)
+    (defFromConfig cfg)
 
 -- | Enter the initial state, running entry callbacks and any events they raise.
 start :: Monad m => Def s ev -> Hooks m s ev -> m s
-start def h = unsafeFromConfig def <$> I.start (defChart def) (toInterp def h)
+start def@Def {defChart} h = unsafeFromConfig def <$> I.start defChart (toInterp def h)
 
 -- | Deliver one event, staying in the current state when no transition is
 -- enabled for it, which is SCXML's behaviour for an unmatched event.
 stepOrStay :: Monad m => Def s ev -> Hooks m s ev -> s -> ev -> m s
-stepOrStay def h s e =
+stepOrStay def@Def {defChart, defToConfig} h s e =
   maybe s (unsafeFromConfig def)
-    <$> I.macrostep (defChart def) (toInterp def h) (defToConfig def s) e
+    <$> I.macrostep defChart (toInterp def h) (defToConfig s) e

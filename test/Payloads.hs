@@ -74,13 +74,15 @@ type Items = [Item]
 newtype Reason = Reason Text
   deriving (Show, Read, Eq)
 
-arrive, check, note :: FsmState -> Maybe FsmEvent -> M (Maybe FsmEvent)
-arrive _ ev = do
-  say ("idle after " <> maybe "start" (T.pack . show) ev)
+arrive, check, note :: FsmEntry -> M (Maybe FsmEvent)
+arrive entry = do
+  say $ case entry of
+    FsmStart _ -> "idle at start"
+    FsmStep t -> "idle after " <> tshow (transitionEvent t) <> " from " <> tshow (transitionFrom t)
   pure Nothing
 
-check _ ev = case ev of
-  Just (Order items n)
+check entry = case entry of
+  FsmStep FsmTransition {transitionEvent = Order items n}
     | n > 0 -> do
         say ("checking " <> T.pack (show n) <> " x " <> named items)
         pure (Just Ok)
@@ -89,12 +91,15 @@ check _ ev = case ev of
   where
     named items = T.intercalate " + " [what | Item what <- items]
 
-note _ ev = do
-  say (case ev of Just (Reject (Reason why)) -> "refused: " <> why; _ -> "refused")
+note entry = do
+  say (case entry of FsmStep FsmTransition {transitionEvent = Reject (Reason why)} -> "refused: " <> why; _ -> "refused")
   pure Nothing
 
 say :: Text -> M ()
 say t = modify' (++ [t])
+
+tshow :: Show a => a -> Text
+tshow = T.pack . show
 
 -- | Start the chart and feed events. Returns the final state and the log.
 run :: [FsmEvent] -> IO (FsmState, [Text])
@@ -112,14 +117,14 @@ spec = do
   (again, _) <- run [Order [Item "book"] 0, Order [Item "pen"] 1]
   pure
     [ ("a payload reaches the entry callback of the state the event causes"
-      , show ["idle after start", "checking 2 x book" :: Text]
+      , show ["idle at start", "checking 2 x book" :: Text]
       , show acceptedLog
       )
     , ("and decides what that callback raises", show (Shipping Packing), show accepted)
     , -- The Reject raised by Checking's callback carries a Reason, which the
       -- callback of the state it leads to reads back.
       ("a raised event carries its payload to the next callback"
-      , show ["idle after start", "refused: nothing ordered of book" :: Text]
+      , show ["idle at start", "refused: nothing ordered of book" :: Text]
       , show refusedLog
       )
     , ("a raised event still selects by name alone", show Refused, show refused)
@@ -127,8 +132,11 @@ spec = do
       , show Idle
       , show shipped
       )
-    , ("a done.state event carries nothing, and reaches the callback after it"
-      , show ["idle after start", "checking 2 x book", "idle after DoneShipping" :: Text]
+    , -- A step caused by a raised event leaves the state the previous step
+      -- settled in, so the callback sees Shipping Sent rather than where the
+      -- caller's Ship was delivered.
+      ("a done.state event carries nothing, and reaches the callback after it"
+      , show ["idle at start", "checking 2 x book", "idle after DoneShipping from Shipping Sent" :: Text]
       , show shippedLog
       )
     , ("the same event on two transitions is one constructor"

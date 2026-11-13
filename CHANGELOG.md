@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.0.0 -- 2026-11-13
+
+- **Breaking.** A callback now takes one argument describing the step it runs
+  in, instead of a state and a `Maybe FsmEvent`, and could previously see only
+  one end of the step: an entry callback where the chart was going, an exit
+  callback where it had been. A step is a generated `FsmTransition` record of
+  the state it leaves (`transitionFrom`), the event that caused it
+  (`transitionEvent`) and the state it settles in (`transitionTo`). An exit
+  callback takes an `FsmTransition`. An entry callback takes an
+  `FsmEntry = FsmStart FsmState | FsmStep FsmTransition`, since it also runs
+  while `initiateStateMachine` enters the initial state, which leaves nothing
+  and has no event. Neither carries a `Maybe` whose `Nothing` could not
+  happen. A step caused by a raised event leaves the state the previous step
+  settled in.
+- Migrating: an exit callback `cb st ev` becomes `cb step` with
+  `transitionFrom step` and `transitionEvent step`. An entry callback matches
+  `FsmStart st` for what used to be `cb st Nothing`, and `FsmStep step` with
+  `transitionTo step` and `transitionEvent step` for `cb st (Just ev)`.
+- `FsmTransition`, its three fields, `FsmEntry`, `FsmStart` and `FsmStep` are
+  generated into the chart's module next to the other generated names, so a
+  module defining any of them no longer compiles, and a state id or event
+  named `FsmTransition`, `FsmStart` or `FsmStep` is rejected as a clash.
+
 ## 0.2.0.0 -- 2026-09-17
 
 - **Breaking.** The `event` attribute now names one event and then the Haskell
