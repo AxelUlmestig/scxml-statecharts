@@ -88,8 +88,9 @@ import qualified Reordered
 --   data Shipping   = Packing | Shipped
 --   data Invoicing  = Unpaid | Settled
 --   data FsmTransition = FsmTransition
---     { transitionFrom :: Maybe FsmState, transitionEvent :: Maybe FsmEvent
+--     { transitionFrom :: FsmState, transitionEvent :: FsmEvent
 --     , transitionTo :: FsmState }
+--   data FsmEntry   = FsmStart FsmState | FsmStep FsmTransition
 --   data FsmEvent   = Submit | Discard | Abandon | Valid | Invalid | Poll
 --                   | PaymentAuthorized | Packed | Paid | DoneFulfilment
 --                   | PaymentDeclined | DoneProcessing | Cancel
@@ -112,12 +113,13 @@ type M = StateT Shop IO
 initiateStateMachine :: M FsmState
 notifyStateMachine :: FsmState -> FsmEvent -> M FsmState
 
--- Callbacks named in the SCXML. Each receives the FsmTransition it runs in.
--- Entry callbacks return m (Maybe FsmEvent), raising an event with Just; exit
--- callbacks return m (). All in one monad, or it does not compile.
+-- Callbacks named in the SCXML. Entry callbacks take an FsmEntry and return
+-- m (Maybe FsmEvent), raising an event with Just; exit callbacks take the
+-- FsmTransition they run in and return m (). All in one monad, or it does not
+-- compile.
 
 -- | A choice state's entry callback: decide by raising an event.
-validate :: FsmTransition -> M (Maybe FsmEvent)
+validate :: FsmEntry -> M (Maybe FsmEvent)
 validate _ = do
   ok <- gets (not . null . items)
   pure (Just (if ok then Valid else Invalid))
@@ -125,33 +127,33 @@ validate _ = do
 -- | Poll something on entry; move on immediately if it is already settled.
 -- Re-entered by the Poll self-transition, which is how polling replaces a
 -- transition script.
-checkPrepayment :: FsmTransition -> M (Maybe FsmEvent)
+checkPrepayment :: FsmEntry -> M (Maybe FsmEvent)
 checkPrepayment _ = do
   say "checked prepayment"
   paid <- gets prepaid
   pure (if paid then Just PaymentAuthorized else Nothing)
 
 -- Entry callbacks that raise nothing still say so, with pure Nothing.
-reserveStock, notifyCustomer :: FsmTransition -> M (Maybe FsmEvent)
+reserveStock, notifyCustomer :: FsmEntry -> M (Maybe FsmEvent)
 reserveStock _ = do
   n <- gets (length . items)
   modify' (\s -> s {reserved = n})
   say "reserved stock"
   pure Nothing
 -- Entry callbacks see the state left, the event that caused the step, and
--- the state entered.
-notifyCustomer step = do
-  say ("notified customer: " <> describe step)
+-- the state entered, unless the chart is only starting.
+notifyCustomer entry = do
+  say ("notified customer: " <> case entry of FsmStart s -> "at start in " <> tshow s; FsmStep step -> describe step)
   pure Nothing
 
--- Exit callbacks see the same step, and cannot raise.
+-- Exit callbacks see the same step, always with all three, and cannot raise.
 releaseStock :: FsmTransition -> M ()
 releaseStock step = modify' (\s' -> s' {reserved = 0}) >> say ("released stock: " <> describe step)
 
 describe :: FsmTransition -> Text
 describe step =
-  maybe "start" tshow (transitionFrom step)
-    <> " --" <> maybe "start" tshow (transitionEvent step)
+  tshow (transitionFrom step)
+    <> " --" <> tshow (transitionEvent step)
     <> "--> " <> tshow (transitionTo step)
 
 say :: Text -> M ()

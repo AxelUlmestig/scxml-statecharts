@@ -13,7 +13,6 @@
 -- legal one.
 module Scxml.Statechart.Interpret
   ( Configuration
-  , Phase (..)
   , Callbacks (..)
   , doneEventName
   , start
@@ -33,10 +32,6 @@ import Scxml.Statechart.Model
 
 type Configuration = Set StateId
 
--- | Where a callback is attached. Exit callbacks may not raise events.
-data Phase = OnEntry | OnExit
-  deriving (Eq, Ord, Show)
-
 -- | How the evaluator reaches the callbacks, and everything it needs to know
 -- about the event type to do so. "Scxml.Statechart.Run" wraps the typed
 -- 'Scxml.Statechart.Run.Hooks' into one of these.
@@ -45,10 +40,14 @@ data Phase = OnEntry | OnExit
 -- but it carries the event itself from the caller through to the callbacks,
 -- so an event may hold a payload the chart knows nothing about.
 data Callbacks m ev = Callbacks
-  { runCallback :: Phase -> Text -> Maybe (Configuration, ev) -> Configuration -> m (Maybe ev)
-    -- ^ run the named callback, given the configuration the step leaves with
-    -- the event that caused it ('Nothing' during 'start'), and the
+  { runEntry :: Text -> Maybe (Configuration, ev) -> Configuration -> m (Maybe ev)
+    -- ^ run the named entry callback, given the configuration the step leaves
+    -- with the event that caused it ('Nothing' during 'start'), and the
     -- configuration the step settles in; returns an event to raise
+  , runExit :: Text -> Configuration -> ev -> Configuration -> m ()
+    -- ^ run the named exit callback, given the configuration the step leaves,
+    -- the event that caused it and the configuration it settles in. Exit
+    -- callbacks only run inside a step, so all three are always there.
   , eventNameOf :: ev -> Text
     -- ^ the name a transition matches on
   , doneEvent :: StateId -> ev
@@ -276,17 +275,17 @@ microstep ch cbs cfg ev =
                     Just tgt ->
                       let e = enter (childNamed tgt (chartRoot ch))
                        in (enConfig e, exiting cfg active, enEntered e)
-              mapM_ (runExits cbs (cfg, ev) cfg') exited
+              mapM_ (runExits cbs cfg ev cfg') exited
               raised <- runEntries cbs (Just (cfg, ev)) cfg' entered
               pure (Just (cfg', raised))
 
 -- | Every callback of a step sees the whole step: the configuration it leaves,
 -- the event that caused it, and the configuration it settles in. Exit
--- callbacks get the same view as entry callbacks, though they run before the
--- new configuration has been entered.
-runExits :: Monad m => Callbacks m ev -> (Configuration, ev) -> Configuration -> Node -> m ()
-runExits cbs cause cfg' n =
-  mapM_ (\a -> runCallback cbs OnExit a (Just cause) cfg') (nodeOnExit n)
+-- callbacks see the new configuration too, though they run before it has
+-- been entered.
+runExits :: Monad m => Callbacks m ev -> Configuration -> ev -> Configuration -> Node -> m ()
+runExits cbs cfg ev cfg' n =
+  mapM_ (\a -> runExit cbs a cfg ev cfg') (nodeOnExit n)
 
 -- | Entry callbacks all get the configuration the step settles in, even
 -- though they run outermost first.
@@ -294,5 +293,5 @@ runEntries :: Monad m => Callbacks m ev -> Maybe (Configuration, ev) -> Configur
 runEntries cbs cause cfg' = fmap concat . mapM one
   where
     one (n, dones) = do
-      raised <- mapM (\a -> runCallback cbs OnEntry a cause cfg') (nodeOnEntry n)
+      raised <- mapM (\a -> runEntry cbs a cause cfg') (nodeOnEntry n)
       pure ([r | Just r <- raised] ++ map (doneEvent cbs) dones)

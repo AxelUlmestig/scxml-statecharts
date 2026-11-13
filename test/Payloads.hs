@@ -74,15 +74,15 @@ type Items = [Item]
 newtype Reason = Reason Text
   deriving (Show, Read, Eq)
 
-arrive, check, note :: FsmTransition -> M (Maybe FsmEvent)
-arrive step = do
-  say $ case (transitionFrom step, transitionEvent step) of
-    (Nothing, Nothing) -> "idle at start"
-    (from, ev) -> "idle after " <> maybe "?" tshow ev <> " from " <> maybe "?" tshow from
+arrive, check, note :: FsmEntry -> M (Maybe FsmEvent)
+arrive entry = do
+  say $ case entry of
+    FsmStart _ -> "idle at start"
+    FsmStep t -> "idle after " <> tshow (transitionEvent t) <> " from " <> tshow (transitionFrom t)
   pure Nothing
 
-check step = case transitionEvent step of
-  Just (Order items n)
+check entry = case entry of
+  FsmStep FsmTransition {transitionEvent = Order items n}
     | n > 0 -> do
         say ("checking " <> T.pack (show n) <> " x " <> named items)
         pure (Just Ok)
@@ -91,8 +91,8 @@ check step = case transitionEvent step of
   where
     named items = T.intercalate " + " [what | Item what <- items]
 
-note step = do
-  say (case transitionEvent step of Just (Reject (Reason why)) -> "refused: " <> why; _ -> "refused")
+note entry = do
+  say (case entry of FsmStep FsmTransition {transitionEvent = Reject (Reason why)} -> "refused: " <> why; _ -> "refused")
   pure Nothing
 
 say :: Text -> M ()

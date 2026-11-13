@@ -3,7 +3,6 @@
 -- callbacks named in the SCXML.
 module Scxml.Statechart.Run
   ( Hooks (..)
-  , Phase (..)
   , entryAction
   , exitAction
   , start
@@ -17,16 +16,17 @@ import qualified Data.Text as T
 
 import Scxml.Statechart.Def
 import qualified Scxml.Statechart.Interpret as I
-import Scxml.Statechart.Interpret (Phase (..))
 import Scxml.Statechart.Model (StateId)
 
 -- | How to run the callbacks named in @<script>@ elements.
-newtype Hooks m s ev = Hooks
-  { runAction :: Phase -> Text -> Maybe (s, ev) -> s -> m (Maybe ev)
-    -- ^ run the named callback with the state the step leaves and the event
-    -- that caused it ('Nothing' during 'start'), and the state the step
-    -- settles in. Exit and entry callbacks see the same step. Returns an
-    -- event to raise.
+data Hooks m s ev = Hooks
+  { runEntry :: Text -> Maybe (s, ev) -> s -> m (Maybe ev)
+    -- ^ run the named entry callback with the state the step leaves and the
+    -- event that caused it ('Nothing' during 'start'), and the state the
+    -- step settles in. Returns an event to raise.
+  , runExit :: Text -> s -> ev -> s -> m ()
+    -- ^ run the named exit callback with the state the step leaves, the
+    -- event that caused it and the state it settles in
   }
 
 -- | Marks an entry callback, which returns the event it raises, if any.
@@ -46,13 +46,16 @@ exitAction = id
 toInterp :: Def s ev -> Hooks m s ev -> I.Callbacks m ev
 toInterp def h =
   I.Callbacks
-    { I.runCallback = \phase name cause cfg' ->
-        runAction h phase name
-          (fmap (\(cfg, ev) -> (unsafeFromConfig def cfg, ev)) cause)
-          (unsafeFromConfig def cfg')
+    { I.runEntry = \name cause cfg' ->
+        runEntry h name
+          (fmap (\(cfg, ev) -> (state cfg, ev)) cause)
+          (state cfg')
+    , I.runExit = \name cfg ev cfg' -> runExit h name (state cfg) ev (state cfg')
     , I.eventNameOf = defEventName def
     , I.doneEvent = defDoneEvent def
     }
+  where
+    state = unsafeFromConfig def
 
 unsafeFromConfig :: Def s ev -> Set.Set StateId -> s
 unsafeFromConfig def cfg =

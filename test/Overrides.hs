@@ -31,9 +31,10 @@ import Scxml.Statechart (scxml)
 initiateStateMachine :: StateT [String] IO FsmState
 notifyStateMachine :: FsmState -> FsmEvent -> StateT [String] IO FsmState
 
-noteEntry, raiseYes, raiseNo :: FsmTransition -> StateT [String] IO (Maybe FsmEvent)
+noteEntry, raiseYes, raiseNo :: FsmEntry -> StateT [String] IO (Maybe FsmEvent)
 -- A record field per thing the step has, so a callback reads only what it uses.
-noteEntry step = modify' (++ ["entered " ++ show (transitionTo step) ++ " from " ++ maybe "start" show (transitionFrom step)]) >> pure Nothing
+noteEntry (FsmStart s) = modify' (++ ["entered " ++ show s ++ " at start"]) >> pure Nothing
+noteEntry (FsmStep step) = modify' (++ ["entered " ++ show (transitionTo step) ++ " from " ++ show (transitionFrom step)]) >> pure Nothing
 raiseYes _ = modify' (++ ["raising Yes"]) >> pure (Just Yes)
 raiseNo _ = modify' (++ ["raising No"]) >> pure (Just No)
 
