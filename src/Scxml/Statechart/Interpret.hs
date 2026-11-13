@@ -74,37 +74,39 @@ data Entered = Entered
 -- | Entering a final child is what completes its parent, so the parent's done
 -- event is raised just after that child's own entry callbacks.
 completing :: StateId -> Node -> Entered -> Entered
-completing parent target e
-  | nodeKind target /= Final = e
-  | otherwise = e {enEntered = attach (enEntered e), enFinal = True}
+completing parent target e@Entered {enEntered}
+  | not (isFinal target) = e
+  | otherwise = e {enEntered = attach enEntered, enFinal = True}
   where
     attach ((h, ds) : rest) = (h, ds ++ [parent]) : rest
     attach [] = []
 
 -- | Enter a state and everything default entry into it implies.
 enter :: Node -> Entered
-enter n = case nodeKind n of
+enter n@Node {nodeId, nodeKind} = case nodeKind of
   Atomic -> leaf False
   Final -> leaf True
   Compound (c :| _) ->
-    let below = completing (nodeId n) c (enter c)
+    let Entered {enConfig, enEntered, enFinal} = completing nodeId c (enter c)
      in Entered
-          { enConfig = Set.insert (nodeId n) (enConfig below)
-          , enEntered = (n, []) : enEntered below
-          , enFinal = enFinal below
+          { enConfig = Set.insert nodeId enConfig
+          , enEntered = (n, []) : enEntered
+          , enFinal
           }
   Parallel rs ->
-    let belows = fmap enter rs
+    let belows = NE.toList (fmap enter rs)
         allFinal = all enFinal belows
-        dones = [nodeId n | allFinal]
      in Entered
-          { enConfig = Set.insert (nodeId n) (Set.unions (fmap enConfig (NE.toList belows)))
-          , enEntered = (n, dones) : concatMap enEntered (NE.toList belows)
+          { enConfig = Set.insert nodeId (Set.unions (map enConfig belows))
+          , enEntered = (n, [nodeId | allFinal]) : concatMap enEntered belows
           , enFinal = allFinal
           }
   where
     leaf isFin =
-      Entered {enConfig = Set.singleton (nodeId n), enEntered = [(n, [])], enFinal = isFin}
+      Entered {enConfig = Set.singleton nodeId, enEntered = [(n, [])], enFinal = isFin}
+
+isFinal :: Node -> Bool
+isFinal Node {nodeKind} = nodeKind == Final
 
 -- | The active states of a subtree, innermost first, which is the order exit
 -- callbacks run in.
@@ -114,19 +116,19 @@ exiting cfg n = concatMap (exiting cfg) (activeChildren cfg n) ++ [n]
 -- | The children of a state that are currently active: one for a compound
 -- state, all of them for a parallel state, none for a leaf.
 activeChildren :: Configuration -> Node -> [Node]
-activeChildren cfg n = case nodeKind n of
+activeChildren cfg Node {nodeKind} = case nodeKind of
   Compound kids -> maybe [] pure (activeChild cfg kids)
   Parallel rs -> NE.toList rs
   _ -> []
 
 activeChild :: Configuration -> NonEmpty Node -> Maybe Node
-activeChild cfg kids = listToMaybe (NE.filter (\c -> Set.member (nodeId c) cfg) kids)
+activeChild cfg kids = listToMaybe (NE.filter (\Node {nodeId} -> Set.member nodeId cfg) kids)
 
 -- | A named child. The parser has already checked that every transition
 -- target is one of its source's siblings, so this cannot fail for a chart the
 -- quasiquoter built.
 childNamed :: StateId -> NonEmpty Node -> Node
-childNamed tgt kids = case NE.filter ((== tgt) . nodeId) kids of
+childNamed tgt kids = case NE.filter (\Node {nodeId} -> nodeId == tgt) kids of
   t : _ -> t
   [] -> error ("Statechart: unknown transition target " ++ T.unpack tgt)
 
@@ -149,20 +151,20 @@ data Reply = Reply
 -- acts on the event if nothing below it did, so the innermost transition wins
 -- and a transition on an enclosing state behaves as a default.
 offer :: Configuration -> Text -> Node -> Reply
-offer cfg ev n = case nodeKind n of
+offer cfg ev n@Node {nodeId, nodeKind, nodeTransitions} = case nodeKind of
   Atomic -> own
   Final -> own
   Compound kids -> case activeChild cfg kids of
     Nothing -> own
     Just active ->
-      let below = offer cfg ev active
-       in if rpConsumed below then absorb kids active below else own
+      let below@Reply {rpConsumed} = offer cfg ev active
+       in if rpConsumed then absorb kids active below else own
   Parallel rs ->
-    let belows = fmap (offer cfg ev) rs
+    let belows = NE.toList (fmap (offer cfg ev) rs)
      in if any rpConsumed belows then absorbRegions belows else own
   where
     -- This state's own transition, for its parent to perform.
-    own = case Map.lookup ev (nodeTransitions n) of
+    own = case Map.lookup ev nodeTransitions of
       Just tgt -> stay {rpMove = Just tgt, rpConsumed = True}
       Nothing -> stay
     stay =
@@ -177,24 +179,25 @@ offer cfg ev n = case nodeKind n of
 
     -- A compound state whose active child either moved to a sibling or
     -- settled internally. Either way this state stays put.
-    absorb kids active below = case rpMove below of
+    absorb kids active below@Reply {rpMove} = case rpMove of
       Nothing ->
-        stay
-          { rpConfig = Set.insert (nodeId n) (rpConfig below)
-          , rpExited = rpExited below
-          , rpEntered = rpEntered below
-          , rpConsumed = True
-          , rpFinal = nodeKind active == Final
-          }
+        let Reply {rpConfig, rpExited, rpEntered} = below
+         in stay
+              { rpConfig = Set.insert nodeId rpConfig
+              , rpExited
+              , rpEntered
+              , rpConsumed = True
+              , rpFinal = isFinal active
+              }
       Just tgt ->
         let target = childNamed tgt kids
-            entered = completing (nodeId n) target (enter target)
+            Entered {enConfig, enEntered, enFinal} = completing nodeId target (enter target)
          in stay
-              { rpConfig = Set.insert (nodeId n) (enConfig entered)
+              { rpConfig = Set.insert nodeId enConfig
               , rpExited = exiting cfg active
-              , rpEntered = enEntered entered
+              , rpEntered = enEntered
               , rpConsumed = True
-              , rpFinal = enFinal entered
+              , rpFinal = enFinal
               }
 
     -- A parallel state: regions cannot have transitions, so none of them can
@@ -203,11 +206,11 @@ offer cfg ev n = case nodeKind n of
       let allFinal = all rpFinal belows
           justCompleted = allFinal && not (inFinalState cfg n)
        in stay
-            { rpConfig = Set.insert (nodeId n) (Set.unions (fmap rpConfig (NE.toList belows)))
-            , rpExited = concatMap rpExited (NE.toList belows)
+            { rpConfig = Set.insert nodeId (Set.unions (map rpConfig belows))
+            , rpExited = concatMap rpExited belows
             , rpEntered =
-                concatMap rpEntered (NE.toList belows)
-                  ++ [(n, [nodeId n]) | justCompleted]
+                concatMap rpEntered belows
+                  ++ [(n, [nodeId]) | justCompleted]
             , rpConsumed = True
             , rpFinal = allFinal
             }
@@ -221,21 +224,20 @@ subtree cfg n = Set.fromList (map nodeId (exiting cfg n))
 -- when its active child is final, and a parallel state is when every region
 -- is. Only a parallel state's own completion consults this.
 inFinalState :: Configuration -> Node -> Bool
-inFinalState cfg n = case nodeKind n of
+inFinalState cfg Node {nodeKind} = case nodeKind of
   Final -> True
   Atomic -> False
-  Compound kids -> maybe False ((== Final) . nodeKind) (activeChild cfg kids)
+  Compound kids -> maybe False isFinal (activeChild cfg kids)
   Parallel rs -> all (inFinalState cfg) (NE.toList rs)
 
 -- Running -------------------------------------------------------------------
 
 -- | Enter the chart's initial state, then process whatever that raises.
 start :: Monad m => Chart -> Callbacks m ev -> m Configuration
-start ch cbs = do
-  let entered = enter (NE.head (chartRoot ch))
-      cfg = enConfig entered
-  raised <- runEntries cbs Nothing cfg (enEntered entered)
-  runToCompletion ch cbs cfg raised
+start ch@Chart {chartRoot} cbs = do
+  let Entered {enConfig, enEntered} = enter (NE.head chartRoot)
+  raised <- runEntries cbs Nothing enConfig enEntered
+  runToCompletion ch cbs enConfig raised
 
 -- | Process one external event. 'Nothing' if no transition was enabled for it.
 macrostep :: Monad m => Chart -> Callbacks m ev -> Configuration -> ev -> m (Maybe Configuration)
@@ -262,19 +264,21 @@ runToCompletion ch cbs = go (0 :: Int)
 -- | One event, one pass. The chart root behaves as a compound state: exactly
 -- one of its children is active, and it has no transitions of its own.
 microstep :: Monad m => Chart -> Callbacks m ev -> Configuration -> ev -> m (Maybe (Configuration, [ev]))
-microstep ch cbs cfg ev =
-  case activeChild cfg (chartRoot ch) of
+microstep Chart {chartRoot} cbs@Callbacks {eventNameOf} cfg ev =
+  case activeChild cfg chartRoot of
     Nothing -> pure Nothing
     Just active ->
-      let below = offer cfg (eventNameOf cbs ev) active
-       in if not (rpConsumed below)
+      let below@Reply {rpConsumed, rpMove} = offer cfg (eventNameOf ev) active
+       in if not rpConsumed
             then pure Nothing
             else do
-              let (cfg', exited, entered) = case rpMove below of
-                    Nothing -> (rpConfig below, rpExited below, rpEntered below)
+              let (cfg', exited, entered) = case rpMove of
+                    Nothing ->
+                      let Reply {rpConfig, rpExited, rpEntered} = below
+                       in (rpConfig, rpExited, rpEntered)
                     Just tgt ->
-                      let e = enter (childNamed tgt (chartRoot ch))
-                       in (enConfig e, exiting cfg active, enEntered e)
+                      let Entered {enConfig, enEntered} = enter (childNamed tgt chartRoot)
+                       in (enConfig, exiting cfg active, enEntered)
               mapM_ (runExits cbs cfg ev cfg') exited
               raised <- runEntries cbs (Just (cfg, ev)) cfg' entered
               pure (Just (cfg', raised))
@@ -284,14 +288,14 @@ microstep ch cbs cfg ev =
 -- callbacks see the new configuration too, though they run before it has
 -- been entered.
 runExits :: Monad m => Callbacks m ev -> Configuration -> ev -> Configuration -> Node -> m ()
-runExits cbs cfg ev cfg' n =
-  mapM_ (\a -> runExit cbs a cfg ev cfg') (nodeOnExit n)
+runExits Callbacks {runExit} cfg ev cfg' Node {nodeOnExit} =
+  mapM_ (\a -> runExit a cfg ev cfg') nodeOnExit
 
 -- | Entry callbacks all get the configuration the step settles in, even
 -- though they run outermost first.
 runEntries :: Monad m => Callbacks m ev -> Maybe (Configuration, ev) -> Configuration -> [(Node, [StateId])] -> m [ev]
-runEntries cbs cause cfg' = fmap concat . mapM one
+runEntries Callbacks {runEntry, doneEvent} cause cfg' = fmap concat . mapM one
   where
-    one (n, dones) = do
-      raised <- mapM (\a -> runEntry cbs a cause cfg') (nodeOnEntry n)
-      pure ([r | Just r <- raised] ++ map (doneEvent cbs) dones)
+    one (Node {nodeOnEntry}, dones) = do
+      raised <- mapM (\a -> runEntry a cause cfg') nodeOnEntry
+      pure ([r | Just r <- raised] ++ map doneEvent dones)

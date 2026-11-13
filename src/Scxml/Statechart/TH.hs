@@ -187,14 +187,13 @@ generate src = do
   -- states that can complete but that no transition mentions.
   let referenced = chartEvents ch
       completing = [n | n <- states, completes n]
-      doneEvents = [Event (I.doneEventName (nodeId n)) [] | n <- completing]
+      doneEvents = [Event (I.doneEventName nodeId) [] | Node {nodeId} <- completing]
       events = referenced ++ filter ((`notElem` map eventName referenced) . eventName) doneEvents
       -- (constructor, payload type names, what it came from, wire name)
-      eventInfo e =
-        let name = eventName e
-         in case T.stripPrefix (T.pack "done.state.") name of
-              Just sid -> (mkName ("Done" ++ T.unpack sid), [], "completion event " ++ show (T.unpack name), name)
-              Nothing -> (mkName (T.unpack name), eventFields e, "event " ++ show (T.unpack name), name)
+      eventInfo Event {eventName = name, eventFields} =
+        case T.stripPrefix (T.pack "done.state.") name of
+          Just sid -> (mkName ("Done" ++ T.unpack sid), [], "completion event " ++ show (T.unpack name), name)
+          Nothing -> (mkName (T.unpack name), eventFields, "event " ++ show (T.unpack name), name)
       eventInfos = map eventInfo events
       eventCons = [(c, origin) | (c, _, origin, _) <- eventInfos]
       -- Enum and Bounded need every constructor nullary, and Ord would make
@@ -211,8 +210,8 @@ generate src = do
     from <- newName ("fromCfg_" ++ nameBase ty)
     let children = maybe (NE.toList (chartRoot ch)) nodeChildren g
     pure (g, Group ty children to from)
-  let groupMap = Map.fromList [(nodeId n, grp) | (Just n, grp) <- groups]
-  rootGroup <- case groups of
+  let groupMap = Map.fromList [(nodeId, grp) | (Just Node {nodeId}, grp) <- groups]
+  Group {gTo = rootTo, gFrom = rootFrom} <- case groups of
     (_, g) : _ -> pure g
     [] -> fail "scxml: internal error, no root group"
   let groupOf sid = case Map.lookup sid groupMap of
@@ -222,13 +221,14 @@ generate src = do
   -- Every generated constructor and type, with its origin, so clashes give a
   -- readable error instead of "Multiple declarations".
   let stateCons =
-        [ (nameFor (nodeId n), "state " ++ show (T.unpack (nodeId n)))
-        | n <- concatMap (gChildren . snd) groups
+        [ (nameFor nodeId, "state " ++ show (T.unpack nodeId))
+        | (_, Group {gChildren}) <- groups
+        , Node {nodeId} <- gChildren
         ]
       typeNames =
         [ (stateT, "the state type"), (eventT, "the event type")
         , (transitionT, "the transition type"), (entryT, "the entry type") ]
-          ++ [(gType grp, "compound state " ++ show (T.unpack (nodeId n))) | (Just n, grp) <- groups]
+          ++ [(gType, "compound state " ++ show (T.unpack nodeId)) | (Just Node {nodeId}, Group {gType}) <- groups]
   checkClashes "constructor"
     ( [(transitionT, "the transition type"), (startCon, "the entry type"), (stepCon, "the entry type")]
         ++ stateCons ++ eventCons )
@@ -289,8 +289,8 @@ generate src = do
              { defChart = $(lift ch)
              , defEventName = $eventNameE
              , defDoneEvent = $doneEventE
-             , defToConfig = $(varE (gTo rootGroup))
-             , defFromConfig = $(varE (gFrom rootGroup))
+             , defToConfig = $(varE rootTo)
+             , defFromConfig = $(varE rootFrom)
              } |])
       []
 
@@ -331,8 +331,8 @@ generate src = do
   -- Storing a state outside Haskell, as the set of active state ids. Generated
   -- rather than exported so that a chart needs no imports beyond the
   -- quasiquoter itself.
-  let toCfg = varE (gTo rootGroup)
-      fromCfg = varE (gFrom rootGroup)
+  let toCfg = varE rootTo
+      fromCfg = varE rootFrom
   toIdsSig <- sigD toIdsName [t| $(conT stateT) -> [Text] |]
   toIdsDec <- do
     x <- newName "st"
@@ -355,10 +355,10 @@ generate src = do
 
 -- | Data type plus configuration conversions for one compound-like node.
 groupDecs :: (StateId -> Name) -> (StateId -> Q Group) -> Group -> Q [Dec]
-groupDecs nameFor groupOf grp = do
-  shapes <- mapM childShape (gChildren grp)
+groupDecs nameFor groupOf Group {gType, gChildren, gTo, gFrom} = do
+  shapes <- mapM childShape gChildren
   let dataDec =
-        dataD (cxt []) (gType grp) [] Nothing
+        dataD (cxt []) gType [] Nothing
           [normalC con [bangType (bang noSourceUnpackedness noSourceStrictness) (conT f) | f <- fields] | (con, fields, _, _) <- shapes]
           [derivClause Nothing (map conT [''Show, ''Read, ''Eq, ''Ord])]
       toDec = do
@@ -366,57 +366,58 @@ groupDecs nameFor groupOf grp = do
         alts <- forM shapes $ \(con, fields, toE, _) -> do
           vars <- mapM (const (newName "r")) fields
           match (conP con (map varP vars)) (normalB (toE vars)) []
-        funD (gTo grp) [clause [varP x] (normalB (caseE (varE x) (map pure alts))) []]
+        funD gTo [clause [varP x] (normalB (caseE (varE x) (map pure alts))) []]
       fromDec = do
         cfg <- newName "cfg"
         let body =
               foldr
-                (\(n, (_, _, _, rebuild)) rest -> [| if Set.member $(lift (nodeId n)) $(varE cfg) then $(rebuild cfg) else $rest |])
+                (\(Node {nodeId}, (_, _, _, rebuild)) rest -> [| if Set.member $(lift nodeId) $(varE cfg) then $(rebuild cfg) else $rest |])
                 [| Nothing |]
-                (zip (gChildren grp) shapes)
-        funD (gFrom grp) [clause [varP cfg] (normalB body) []]
+                (zip gChildren shapes)
+        funD gFrom [clause [varP cfg] (normalB body) []]
   sequence
     [ dataDec
-    , sigD (gTo grp) [t| $(conT (gType grp)) -> Set.Set Text |]
+    , sigD gTo [t| $(conT gType) -> Set.Set Text |]
     , toDec
-    , sigD (gFrom grp) [t| Set.Set Text -> Maybe $(conT (gType grp)) |]
+    , sigD gFrom [t| Set.Set Text -> Maybe $(conT gType) |]
     , fromDec
     ]
   where
     -- For one child: (constructor, field types, config-of-fields, rebuild-from-config)
     childShape :: Node -> Q (Name, [Name], [Name] -> Q Exp, Name -> Q Exp)
-    childShape node = do
-      let sid = nodeId node
-          con = nameFor sid
-      case nodeKind node of
+    -- The groups below are the children's, so their fields are renamed rather
+    -- than punned, which would shadow this group's own.
+    childShape Node {nodeId = sid, nodeKind} = do
+      let con = nameFor sid
+      case nodeKind of
         Compound _ -> do
-          sub <- groupOf sid
+          Group {gType = subType, gTo = subTo, gFrom = subFrom} <- groupOf sid
           pure
             ( con
-            , [gType sub]
+            , [subType]
             , \vs -> case vs of
-                [v] -> [| Set.insert $(lift sid) ($(varE (gTo sub)) $(varE v)) |]
+                [v] -> [| Set.insert $(lift sid) ($(varE subTo) $(varE v)) |]
                 _ -> fail "scxml: internal error, compound state expects exactly one field"
-            , \cfg -> [| fmap $(conE con) ($(varE (gFrom sub)) $(varE cfg)) |]
+            , \cfg -> [| fmap $(conE con) ($(varE subFrom) $(varE cfg)) |]
             )
         Parallel regionNodes -> do
-          regions <- forM (NE.toList regionNodes) $ \rn -> case nodeKind rn of
-            Compound _ -> Just <$> groupOf (nodeId rn)
+          regions <- forM (NE.toList regionNodes) $ \Node {nodeId = rid, nodeKind = regionKind} -> case regionKind of
+            Compound _ -> Just <$> groupOf rid
             Parallel _ ->
               fail $
-                "scxml: <parallel> " ++ T.unpack (nodeId rn) ++ " is directly inside another <parallel>, which is not supported."
+                "scxml: <parallel> " ++ T.unpack rid ++ " is directly inside another <parallel>, which is not supported."
                   ++ " Flatten it: its regions can become regions of the outer <parallel>, since all of them are active at once either way."
                   ++ " The only thing flattening loses is a done.state event for the inner one on its own."
             _ -> pure Nothing
           let regionIds = map nodeId (NE.toList regionNodes)
-              fieldTypes = [gType g | Just g <- regions]
+              fieldTypes = [subType | Just Group {gType = subType} <- regions]
               toE vs =
                 let go [] _ = []
                     go ((r, Nothing) : rest) vars = [| Set.singleton $(lift r) |] : go rest vars
-                    go ((r, Just g) : rest) (v : vars) = [| Set.insert $(lift r) ($(varE (gTo g)) $(varE v)) |] : go rest vars
+                    go ((r, Just Group {gTo = subTo}) : rest) (v : vars) = [| Set.insert $(lift r) ($(varE subTo) $(varE v)) |] : go rest vars
                     go _ [] = error "scxml: internal error, region/field mismatch"
                  in [| Set.insert $(lift sid) (Set.unions $(listE (go (zip regionIds regions) vs))) |]
-              rebuild cfg = foldl (\acc g -> [| $acc <*> $(varE (gFrom g)) $(varE cfg) |]) [| pure $(conE con) |] [g | Just g <- regions]
+              rebuild cfg = foldl (\acc subFrom -> [| $acc <*> $(varE subFrom) $(varE cfg) |]) [| pure $(conE con) |] [subFrom | Just Group {gFrom = subFrom} <- regions]
           pure (con, fieldTypes, toE, rebuild)
         _ ->
           pure

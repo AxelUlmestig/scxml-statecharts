@@ -44,32 +44,32 @@ exitAction = id
 -- | The event reaching a callback is the one the caller passed in, not a value
 -- rebuilt from its name, so whatever payload it carries survives the trip.
 toInterp :: Def s ev -> Hooks m s ev -> I.Callbacks m ev
-toInterp def h =
+toInterp def@Def {defEventName, defDoneEvent} Hooks {runEntry, runExit} =
   I.Callbacks
     { I.runEntry = \name cause cfg' ->
-        runEntry h name
+        runEntry name
           (fmap (\(cfg, ev) -> (state cfg, ev)) cause)
           (state cfg')
-    , I.runExit = \name cfg ev cfg' -> runExit h name (state cfg) ev (state cfg')
-    , I.eventNameOf = defEventName def
-    , I.doneEvent = defDoneEvent def
+    , I.runExit = \name cfg ev cfg' -> runExit name (state cfg) ev (state cfg')
+    , I.eventNameOf = defEventName
+    , I.doneEvent = defDoneEvent
     }
   where
     state = unsafeFromConfig def
 
 unsafeFromConfig :: Def s ev -> Set.Set StateId -> s
-unsafeFromConfig def cfg =
+unsafeFromConfig Def {defFromConfig} cfg =
   fromMaybe
     (error ("Statechart: interpreter produced an invalid configuration: " ++ show (map T.unpack (Set.toList cfg))))
-    (defFromConfig def cfg)
+    (defFromConfig cfg)
 
 -- | Enter the initial state, running entry callbacks and any events they raise.
 start :: Monad m => Def s ev -> Hooks m s ev -> m s
-start def h = unsafeFromConfig def <$> I.start (defChart def) (toInterp def h)
+start def@Def {defChart} h = unsafeFromConfig def <$> I.start defChart (toInterp def h)
 
 -- | Deliver one event, staying in the current state when no transition is
 -- enabled for it, which is SCXML's behaviour for an unmatched event.
 stepOrStay :: Monad m => Def s ev -> Hooks m s ev -> s -> ev -> m s
-stepOrStay def h s e =
+stepOrStay def@Def {defChart, defToConfig} h s e =
   maybe s (unsafeFromConfig def)
-    <$> I.macrostep (defChart def) (toInterp def h) (defToConfig def s) e
+    <$> I.macrostep defChart (toInterp def h) (defToConfig s) e
