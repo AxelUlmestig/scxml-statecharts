@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.0.0 -- 2026-11-17
+
+- The generated code no longer hands an untyped copy of the chart to an
+  interpreter. Each layer of the chart, meaning `FsmState` and the type of each
+  compound state, gets an instance of an internal `Fsm` class, and a step is a
+  `case` per layer instead of set operations on state ids. A region of a
+  parallel state gets an instance too, on an internal type of its own. Callbacks
+  are named in those instances by generated enumerations, and the generated
+  functions map each one to its callback, so the monad is still inferred from
+  the callbacks.
+- **Breaking.** A chart module needs `MultiParamTypeClasses`, since the
+  generated instances have several parameters. GHC2021 enables it; a
+  Haskell2010 module gets an error from the quasiquoter saying so.
+- **Breaking.** `fsmChart` is no longer generated, and the `Def` it built is
+  gone, along with the interpreter it was for.
+- A done event is now queued after the events the entry callbacks of its step
+  raise, rather than straight after the entry callbacks of the state that
+  completed. Only a step that both raises an event and completes a state sees
+  a different order.
+
 ## 0.3.0.0 -- 2026-11-13
 
 - **Breaking.** A callback now takes one argument describing the step it runs

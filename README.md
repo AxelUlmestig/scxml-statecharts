@@ -7,7 +7,8 @@ state type is exactly one legal configuration: illegal states are
 unrepresentable and `case` is exhaustive.
 
 The library exports one name, the `scxml` quasiquoter. Everything a chart needs
-is generated into your own module.
+is generated into your own module, which needs `MultiParamTypeClasses` for the
+instances the chart runs on. GHC2021 enables it.
 
 ## Example
 
@@ -75,6 +76,10 @@ notifyStateMachine      -- deliver one event
 serializeStateMachine   :: FsmState -> [Text]
 deserializeStateMachine :: [Text] -> Maybe FsmState
 ```
+
+It also generates an instance of the library's internal `Fsm` class for
+`FsmState` and for each compound state's type, which is what the two functions
+run on, and a few internal types those instances need.
 
 A compound state becomes a constructor carrying a sum type of the same name,
 which Haskell allows since types and constructors live in separate namespaces.

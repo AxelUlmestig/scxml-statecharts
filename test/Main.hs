@@ -11,8 +11,10 @@ import System.Exit (exitFailure)
 
 -- The library's entire public API.
 import Scxml.Statechart (scxml)
+import qualified Completion
 import qualified Overrides
 import qualified Payloads
+import qualified Regions
 import qualified Reordered
 
 -- An order process: compound states, a parallel state that completes via
@@ -303,7 +305,9 @@ main = do
   reordered <- Reordered.spec
   overrides <- Overrides.spec
   payloads <- Payloads.spec
-  mapM_ (\(label, expected, actual) -> check label expected actual) (reordered ++ overrides ++ payloads)
+  regions <- Regions.spec
+  completion <- Completion.spec
+  mapM_ (\(label, expected, actual) -> check label expected actual) (reordered ++ overrides ++ payloads ++ regions ++ completion)
 
   n <- readIORef failures
   when (n > 0) exitFailure
