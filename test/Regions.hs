@@ -1,4 +1,5 @@
 {-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE TypeFamilies #-}
 -- | A parallel state's regions have callbacks of their own, and a region that
 -- is an atomic state is active for as long as the parallel state is but can
 -- never complete, so neither can the parallel state holding it.

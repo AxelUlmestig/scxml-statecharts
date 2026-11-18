@@ -1,4 +1,5 @@
 {-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE TypeFamilies #-}
 -- | Completion without any callbacks: a compound state whose initial child is
 -- final completes as soon as the chart starts, and one event can complete
 -- several regions of a parallel state at once.

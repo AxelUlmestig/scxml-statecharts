@@ -1,4 +1,5 @@
 {-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE TypeFamilies           #-}
 
 -- | The engine generated charts run on. The @scxml@ quasiquoter generates one
 -- 'Fsm' instance per layer of the chart: one for @FsmState@, one for each
@@ -50,15 +51,16 @@ entryAction = id
 exitAction :: m () -> m ()
 exitAction = id
 
--- | One layer of a chart. The action types are class parameters rather than
--- associated types so that the generated instances need no extension in the
--- module they are spliced into: an associated type instance needs
--- @TypeFamilies@ there, while a multi-parameter instance is plain GHC2021.
-class Fsm state event entryAction exitAction | state -> event entryAction exitAction where
+-- | One layer of a chart. The generated instances live in the chart's module,
+-- so that module needs @TypeFamilies@ for the associated types, which the
+-- quasiquoter checks for.
+class Fsm state event | state -> event where
+  type EntryAction state
+  type ExitAction state
   initialState      :: state
   nextState         :: event -> state -> Maybe state
-  onEntry           :: state -> [entryAction]   -- e.g. data FsmEntryAction = FetchStatus | SendReport
-  onExit            :: state -> [exitAction]
+  onEntry           :: state -> [EntryAction state]   -- e.g. data FsmEntryAction = FetchStatus | SendReport
+  onExit            :: state -> [ExitAction state]
   isFinal           :: state -> Bool
   doneEvent         :: state -> Maybe event
   applyToSubstates  ::
@@ -66,7 +68,10 @@ class Fsm state event entryAction exitAction | state -> event entryAction exitAc
     state ->
     (
       forall substate.
-      Fsm substate event entryAction exitAction =>
+      (Fsm substate event
+      , EntryAction state ~ EntryAction substate
+      , ExitAction state ~ ExitAction substate
+      ) =>
       substate ->
       (substate, result)
     ) ->
@@ -96,9 +101,9 @@ instance Monoid (ConsumeEventResults events entryAction exitAction) where
 
 -- | initiate a new state machine
 initiate ::
-  (Monad m, Fsm state event entryAction exitAction) =>
-  (entryAction -> FsmEntry state event -> m (Maybe event)) ->
-  (exitAction -> FsmTransition state event -> m ()) ->
+  (Monad m, Fsm state event) =>
+  (EntryAction state -> FsmEntry state event -> m (Maybe event)) ->
+  (ExitAction state -> FsmTransition state event -> m ()) ->
   m state
 initiate entry exit = do
   let state = initialState
@@ -113,16 +118,16 @@ initiate entry exit = do
 
 -- | provide events for a state machine to act on
 consumeEvents ::
-  (Monad m, Fsm state event entryAction exitAction) =>
-  (entryAction -> FsmEntry state event -> m (Maybe event)) ->
-  (exitAction -> FsmTransition state event -> m ()) ->
+  (Monad m, Fsm state event) =>
+  (EntryAction state -> FsmEntry state event -> m (Maybe event)) ->
+  (ExitAction state -> FsmTransition state event -> m ()) ->
   [event] ->
   state ->
   m state
 consumeEvents = go 1000
   where
     -- same signature as top level but with added Int for the loop counter
-    go :: (Monad m, Fsm state event entryAction exitAction) => Int -> (entryAction -> FsmEntry state event -> m (Maybe event)) -> (exitAction -> FsmTransition state event -> m ()) -> [event] -> state -> m state
+    go :: (Monad m, Fsm state event) => Int -> (EntryAction state -> FsmEntry state event -> m (Maybe event)) -> (ExitAction state -> FsmTransition state event -> m ()) -> [event] -> state -> m state
     go remainingAttempts entry exit events originalState = do
       when (remainingAttempts < 0) $ error "The state machine got stuck in an infinite loop"
 
@@ -146,7 +151,7 @@ consumeEvents = go 1000
           -- run the state machine again with the events from the onentry callbacks and parallel states being all done
           go (remainingAttempts - 1) entry exit (remainingEvents <> newEvents <> parallelStatesDoneEvents) newState
 
-    moveStateMachine :: Fsm state event entryAction exitAction => event -> state -> (state, ConsumeEventResults event entryAction exitAction)
+    moveStateMachine :: Fsm state event => event -> state -> (state, ConsumeEventResults event (EntryAction state) (ExitAction state))
     moveStateMachine event state =
       let (state', consumeEventResults) = applyToSubstates state (moveStateMachine event)
       -- if the substates consumed the event then this state won't act on the event
@@ -164,13 +169,13 @@ consumeEvents = go 1000
             in (newState, cer)
 
 
-getAllDoneEvents :: Fsm state event entryAction exitAction => state -> [event]
+getAllDoneEvents :: Fsm state event => state -> [event]
 getAllDoneEvents state =
   let (_, events) = applyToSubstates state (\substate -> (substate, getAllDoneEvents substate))
   in events <> getStateDoneEvent state
 
 -- | check if all the immediate substates are `final`, then get this state's done event if that's the case
-getStateDoneEvent :: Fsm state event entryAction exitAction => state -> [event]
+getStateDoneEvent :: Fsm state event => state -> [event]
 getStateDoneEvent state =
   let (_, allSubStatesFinal) = applyToSubstates state (\substate -> (substate, Just (All (isFinal substate))))
   in case allSubStatesFinal of
@@ -178,13 +183,13 @@ getStateDoneEvent state =
     _               -> []
 
 
-getOnEntryFunctions :: Fsm state event entryAction exitAction => state -> [entryAction]
+getOnEntryFunctions :: Fsm state event => state -> [EntryAction state]
 getOnEntryFunctions state =
   let (_, substateOnEntry) = applyToSubstates state (\substate -> (substate, getOnEntryFunctions substate))
   in onEntry state <> substateOnEntry
 
 
-getOnExitFunctions :: Fsm state event entryAction exitAction => state -> [exitAction]
+getOnExitFunctions :: Fsm state event => state -> [ExitAction state]
 getOnExitFunctions state =
   let (_, substateOnExit) = applyToSubstates state (\substate -> (substate, getOnExitFunctions substate))
   in substateOnExit <> onExit state

@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE TypeFamilies #-}
 -- | Events that carry data. The @event@ attribute names the event and then the
 -- Haskell types its constructor holds, so @event="Order Item Int"@ declares
 -- @Order Item Int@. Selection still happens on the name alone: the payload

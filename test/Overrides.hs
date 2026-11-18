@@ -1,4 +1,5 @@
 {-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE TypeFamilies #-}
 -- | Two behaviours nothing else covers: a transition on an enclosing state
 -- acting as a default that an inner state overrides, and several entry
 -- callbacks on one state each raising an event.

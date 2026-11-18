@@ -10,9 +10,9 @@
   are named in those instances by generated enumerations, and the generated
   functions map each one to its callback, so the monad is still inferred from
   the callbacks.
-- **Breaking.** A chart module needs `MultiParamTypeClasses`, since the
-  generated instances have several parameters. GHC2021 enables it; a
-  Haskell2010 module gets an error from the quasiquoter saying so.
+- **Breaking.** A chart module needs `TypeFamilies`, for the generated
+  instances' associated types, and `MultiParamTypeClasses`, which GHC2021
+  enables. The quasiquoter names whichever is missing.
 - **Breaking.** `fsmChart` is no longer generated, and the `Def` it built is
   gone, along with the interpreter it was for.
 - A done event is now queued after the events the entry callbacks of its step

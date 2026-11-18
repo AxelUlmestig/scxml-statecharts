@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE TypeFamilies #-}
 module Main (main) where
 
 import Control.Monad (unless, when)

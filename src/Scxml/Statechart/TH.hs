@@ -51,9 +51,9 @@
 -- Haskell, prefer the generated @serializeStateMachine@ over @Show@.
 module Scxml.Statechart.TH (scxml) where
 
-import Control.Monad (forM, unless)
+import Control.Monad (filterM, forM, unless)
 import Data.Char (isAlphaNum, isLower, isUpper)
-import Data.List (find, nub)
+import Data.List (find, intercalate, nub)
 import qualified Data.Map.Strict as Map
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Set as Set
@@ -72,6 +72,7 @@ import Scxml.Statechart.Parse
 -- chart. A light switch, whose two states each announce themselves on entry:
 --
 -- > {-# LANGUAGE QuasiQuotes #-}
+-- > {-# LANGUAGE TypeFamilies #-}
 -- > module LightSwitch where
 -- >
 -- > import Scxml.Statechart (scxml)
@@ -158,12 +159,14 @@ data Group = Group
 
 generate :: String -> Q [Dec]
 generate src = do
-  -- The instances generated below have several parameters, which GHC checks
-  -- against the extensions of the module they are spliced into. GHC2021 has
-  -- it; Haskell2010 does not, and would otherwise report it once per instance.
-  mptc <- isExtEnabled MultiParamTypeClasses
-  unless mptc $
-    fail "scxml: the module needs the MultiParamTypeClasses extension, which GHC2021 enables. Add {-# LANGUAGE MultiParamTypeClasses #-} or use GHC2021."
+  -- The instances generated below have two parameters and associated types,
+  -- which GHC checks against the extensions of the module they are spliced
+  -- into. Without this it would report each missing one once per instance.
+  missing <- filterM (fmap not . isExtEnabled) [MultiParamTypeClasses, TypeFamilies]
+  unless (null missing) $
+    fail $
+      "scxml: the module needs " ++ unwords (map show missing)
+        ++ " for the instances the chart runs on. Add {-# LANGUAGE " ++ intercalate ", " (map show missing) ++ " #-}."
   ch <- orFail (parseScxml src)
   -- Everything here is a walk of the tree: a node carries its own children,
   -- so nothing needs looking up by id.
@@ -476,10 +479,13 @@ data Region = Region
   , rGroup :: Maybe Group
   }
 
--- | The instance head every layer shares: the same event and action types.
+-- | The instance head and associated types every layer shares.
 fsmInstance :: Ctx -> Name -> [Q Dec] -> Q Dec
-fsmInstance Ctx {cEventT, cEntryActT, cExitActT} ty =
-  instanceD (cxt []) [t| Fsm.Fsm $(conT ty) $(conT cEventT) $(conT cEntryActT) $(conT cExitActT) |]
+fsmInstance Ctx {cEventT, cEntryActT, cExitActT} ty methods =
+  instanceD (cxt []) [t| Fsm.Fsm $(conT ty) $(conT cEventT) |] $
+    tySynInstD (tySynEqn Nothing [t| Fsm.EntryAction $(conT ty) |] (conT cEntryActT))
+      : tySynInstD (tySynEqn Nothing [t| Fsm.ExitAction $(conT ty) |] (conT cExitActT))
+      : methods
 
 method :: Name -> [Q Pat] -> Q Exp -> Q Dec
 method name args body = funD name [clause args (normalB body) []]

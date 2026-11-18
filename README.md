@@ -7,8 +7,9 @@ state type is exactly one legal configuration: illegal states are
 unrepresentable and `case` is exhaustive.
 
 The library exports one name, the `scxml` quasiquoter. Everything a chart needs
-is generated into your own module, which needs `MultiParamTypeClasses` for the
-instances the chart runs on. GHC2021 enables it.
+is generated into your own module, which needs `TypeFamilies` and
+`MultiParamTypeClasses` for the instances the chart runs on. GHC2021 enables
+the second; the quasiquoter says which are missing.
 
 ## Example
 
@@ -16,6 +17,7 @@ A monitor that polls something and reports when it is healthy:
 
 ```haskell
 {-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE TypeFamilies #-}
 module Monitor where
 
 import Scxml.Statechart (scxml)
