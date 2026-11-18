@@ -3,7 +3,8 @@
 
 -- | The engine generated charts run on. The @scxml@ quasiquoter generates one
 -- 'Fsm' instance per layer of the chart: one for @FsmState@, one for each
--- compound state's type, and one for each region of a parallel state. Each
+-- compound state's type, and one for each atomic region of a parallel state,
+-- whose type has the region as its only constructor. Each
 -- instance only knows its own children, and 'applyToSubstates' is how the
 -- functions here reach the layer below.
 --

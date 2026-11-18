@@ -10,10 +10,14 @@
 -- * @data FsmState@: one constructor per child of @<scxml>@, named exactly as
 --   the state id. A compound state becomes a constructor carrying a sum type
 --   of the same name as the state; a parallel state becomes a constructor
---   with one field per compound region; atomic and final states are nullary.
+--   with one field per region, typed like a compound state for a compound
+--   region and as a one-constructor type of the region's name for an atomic
+--   one; atomic and final states are nullary.
 -- * @data FsmEvent@: one constructor per event name, verbatim, carrying the
 --   payload types written after the name in the @event@ attribute, plus a
---   nullary @DoneX@ for SCXML's automatic @done.state.X@ completion events.
+--   nullary @DoneX@ for SCXML's automatic @done.state.X@ completion events
+--   of every state that can complete, other than a region, whose completion
+--   nothing could react to.
 -- * @data FsmTransition@: one step of the chart, a record of
 --   @transitionFrom :: FsmState@, @transitionEvent :: FsmEvent@ and
 --   @transitionTo :: FsmState@. What an exit callback receives.
@@ -21,11 +25,13 @@
 --   entry callback receives. @FsmStart@ carries the initial state while
 --   @initiateStateMachine@ enters it, which leaves no state and has no event.
 -- * An instance of "Scxml.Statechart.Fsm"'s @Fsm@ class for @FsmState@ and
---   for each compound state's type, which is what the generated functions run
---   on. A region of a parallel state gets an instance too, on an internal type
---   of its own, since the parallel state's constructor holds the region's
---   children rather than the region. Callbacks are named in those instances by
---   internal enumerations, one constructor per callback.
+--   for each compound state's and atomic region's type, which is what the
+--   generated functions run on. A region is entered and left exactly when its
+--   parallel state is, so the region's own callbacks run with the parallel
+--   state's: on entry the parallel state's, then its regions' in document
+--   order, then whatever is inside the regions; on exit the reverse. Callbacks
+--   are named in those instances by internal enumerations, one constructor per
+--   callback.
 -- * @serializeStateMachine :: FsmState -> [Text]@ and
 --   @deserializeStateMachine :: [Text] -> Maybe FsmState@, which store a state
 --   as the set of active state ids and read it back, rejecting anything that
@@ -51,7 +57,7 @@
 -- Haskell, prefer the generated @serializeStateMachine@ over @Show@.
 module Scxml.Statechart.TH (scxml) where
 
-import Control.Monad (filterM, forM, unless)
+import Control.Monad (filterM, forM, forM_, unless)
 import Data.Char (isAlphaNum, isLower, isUpper)
 import Data.List (find, intercalate, nub)
 import qualified Data.Map.Strict as Map
@@ -188,6 +194,8 @@ generate src = do
       -- keeps types and constructors in separate namespaces.
       nameFor sid = mkName (T.unpack sid)
       compounds = [n | n <- states, Compound _ <- [nodeKind n]]
+      regionNodes = [r | Node {nodeKind = Parallel rs} <- states, r <- NE.toList rs]
+      atomicRegions = [r | r@Node {nodeKind = Atomic} <- regionNodes]
 
   -- Callback names
   let entryActions = nub (concatMap nodeOnEntry states)
@@ -195,9 +203,10 @@ generate src = do
   mapM_ (orFail . checkVarName) (nub (entryActions ++ exitActions))
 
   -- Events: those named in transitions, in document order, then done events of
-  -- states that can complete but that no transition mentions.
+  -- states that can complete but that no transition mentions. A region cannot
+  -- have transitions, so nothing could react to its done event.
   let referenced = chartEvents ch
-      completing = [n | n <- states, completes n]
+      completing = [n | n <- states, completes n, nodeId n `notElem` map nodeId regionNodes]
       doneEvents = [Event (T.pack "done.state." <> nodeId) [] | Node {nodeId} <- completing]
       events = referenced ++ filter ((`notElem` map eventName referenced) . eventName) doneEvents
       -- (constructor, payload type names, what it came from, wire name)
@@ -215,11 +224,17 @@ generate src = do
         | any (\(_, fs, _, _) -> not (null fs)) eventInfos = [''Show, ''Read, ''Eq]
         | otherwise = [''Show, ''Read, ''Eq, ''Ord, ''Enum, ''Bounded]
 
-  groups <- forM (Nothing : map Just compounds) $ \g -> do
+  -- An atomic region is a field of its parallel state like any other region,
+  -- so it gets a type whose only constructor is itself. Its callbacks run with
+  -- the parallel state's, so they are left out of that type's instance.
+  groups <- forM (Nothing : map Just (compounds ++ atomicRegions)) $ \g -> do
     let ty = maybe stateT (nameFor . nodeId) g
     to <- newName ("toCfg_" ++ nameBase ty)
     from <- newName ("fromCfg_" ++ nameBase ty)
-    let children = maybe (NE.toList (chartRoot ch)) nodeChildren g
+    let children = case g of
+          Nothing -> NE.toList (chartRoot ch)
+          Just r@Node {nodeKind = Atomic} -> [r {nodeOnEntry = [], nodeOnExit = []}]
+          Just n -> nodeChildren n
     pure (g, Group ty children to from)
   let groupMap = Map.fromList [(nodeId, grp) | (Just Node {nodeId}, grp) <- groups]
   Group {gTo = rootTo, gFrom = rootFrom} <- case groups of
@@ -239,7 +254,17 @@ generate src = do
       typeNames =
         [ (stateT, "the state type"), (eventT, "the event type")
         , (transitionT, "the transition type"), (entryT, "the entry type") ]
-          ++ [(gType, "compound state " ++ show (T.unpack nodeId)) | (Just Node {nodeId}, Group {gType}) <- groups]
+          ++ [ (gType, what ++ show (T.unpack nodeId))
+             | (Just Node {nodeId, nodeKind}, Group {gType}) <- groups
+             , let what = if nodeKind == Atomic then "region " else "compound state "
+             ]
+  -- An event spelled like a completion event is almost always meant as one,
+  -- and the clash it would cause says nothing about done.state.
+  forM_ [(name, nodeId) | Event {eventName = name} <- referenced, Node {nodeId} <- completing, name == T.pack "Done" <> nodeId] $ \(name, sid) ->
+    fail $
+      "scxml: event " ++ show (T.unpack name) ++ " has the name generated for " ++ T.unpack sid
+        ++ "'s completion event. To react to " ++ T.unpack sid ++ " completing, write event=\"done.state."
+        ++ T.unpack sid ++ "\"; otherwise rename the event."
   checkClashes "constructor"
     ( [(transitionT, "the transition type"), (startCon, "the entry type"), (stepCon, "the entry type")]
         ++ stateCons ++ eventCons )
@@ -283,21 +308,6 @@ generate src = do
   let enumDec ty cons = dataD (cxt []) ty [] Nothing [normalC c [] | (_, c) <- cons] []
   actionDecs <- sequence [enumDec entryActT entryCons, enumDec exitActT exitCons]
 
-  -- A region of a parallel state is not a constructor of anything: the
-  -- parallel state's constructor holds the regions' children. A region still
-  -- has callbacks and a done event of its own, so it gets an internal type as
-  -- the layer between the two, and an atomic region, which has no field at
-  -- all, gets one that can say it never completes.
-  regions <- fmap Map.fromList $
-    forM [r | Node {nodeKind = Parallel rs} <- states, r <- NE.toList rs] $ \r@Node {nodeId = rid, nodeKind = regionKind} -> do
-      -- A name from newName binds one namespace, so the type and its
-      -- constructor need one each.
-      ty <- newName ("Region" ++ T.unpack rid)
-      con <- newName ("Region" ++ T.unpack rid)
-      grp <- case regionKind of
-        Compound _ -> Just <$> groupOf rid
-        _ -> pure Nothing
-      pure (rid, Region r ty con grp)
   let eventCons' = Map.fromList [(name, c) | (c, _, _, name) <- eventInfos]
       ctx =
         Ctx
@@ -305,14 +315,12 @@ generate src = do
           , cEntryActT = entryActT
           , cExitActT = exitActT
           , cNameFor = nameFor
-          , cRegionOf = \rid -> maybe (fail ("scxml: internal error, no region for " ++ T.unpack rid)) pure (Map.lookup rid regions)
           , cEventCon = \name -> maybe (fail ("scxml: internal error, no constructor for event " ++ T.unpack name)) pure (Map.lookup name eventCons')
           , cEntryCon = \fn -> maybe (error "scxml: internal error, unknown entry callback") id (lookup fn entryCons)
           , cExitCon = \fn -> maybe (error "scxml: internal error, unknown exit callback") id (lookup fn exitCons)
           , cEventCount = length eventInfos
           }
   groupInstances <- mapM (groupInstance ctx . snd) groups
-  regionDecs <- concat <$> mapM (regionDecs' ctx) (Map.elems regions)
 
   -- The functions the user calls. The dispatchers are inlined into each
   -- rather than shared, so a polymorphic monad does not hit the monomorphism
@@ -380,7 +388,7 @@ generate src = do
     funD fromIdsName [clause [varP ids] (normalB body) []]
 
   pure
-    ( stateDecs ++ [eventDec, transitionDec, entryDec] ++ actionDecs ++ groupInstances ++ regionDecs
+    ( stateDecs ++ [eventDec, transitionDec, entryDec] ++ actionDecs ++ groupInstances
         ++ [startDec, stepDec, toIdsSig, toIdsDec, fromIdsSig, fromIdsDec] )
 
 -- | Data type plus configuration conversions for one compound-like node.
@@ -432,23 +440,17 @@ groupDecs nameFor groupOf Group {gType, gChildren, gTo, gFrom} = do
             )
         Parallel regionNodes -> do
           regions <- forM (NE.toList regionNodes) $ \Node {nodeId = rid, nodeKind = regionKind} -> case regionKind of
-            Compound _ -> Just <$> groupOf rid
             Parallel _ ->
               fail $
                 "scxml: <parallel> " ++ T.unpack rid ++ " is directly inside another <parallel>, which is not supported."
                   ++ " Flatten it: its regions can become regions of the outer <parallel>, since all of them are active at once either way."
-                  ++ " The only thing flattening loses is a done.state event for the inner one on its own."
-            _ -> pure Nothing
-          let regionIds = map nodeId (NE.toList regionNodes)
-              fieldTypes = [subType | Just Group {gType = subType} <- regions]
-              toE vs =
-                let go [] _ = []
-                    go ((r, Nothing) : rest) vars = [| Set.singleton $(lift r) |] : go rest vars
-                    go ((r, Just Group {gTo = subTo}) : rest) (v : vars) = [| Set.insert $(lift r) ($(varE subTo) $(varE v)) |] : go rest vars
-                    go _ [] = error "scxml: internal error, region/field mismatch"
-                 in [| Set.insert $(lift sid) (Set.unions $(listE (go (zip regionIds regions) vs))) |]
-              rebuild cfg = foldl (\acc subFrom -> [| $acc <*> $(varE subFrom) $(varE cfg) |]) [| pure $(conE con) |] [subFrom | Just Group {gFrom = subFrom} <- regions]
-          pure (con, fieldTypes, toE, rebuild)
+            _ -> (,) rid <$> groupOf rid
+          -- An atomic region's own conversion already holds its id, which
+          -- inserting again leaves alone.
+          let toE vs =
+                [| Set.insert $(lift sid) (Set.unions $(listE [[| Set.insert $(lift r) ($(varE subTo) $(varE v)) |] | ((r, Group {gTo = subTo}), v) <- zip regions vs])) |]
+              rebuild cfg = foldl (\acc Group {gFrom = subFrom} -> [| $acc <*> $(varE subFrom) $(varE cfg) |]) [| pure $(conE con) |] (map snd regions)
+          pure (con, [subType | (_, Group {gType = subType}) <- regions], toE, rebuild)
         _ ->
           pure
             ( con
@@ -463,20 +465,10 @@ data Ctx = Ctx
   , cEntryActT  :: Name
   , cExitActT   :: Name
   , cNameFor    :: StateId -> Name
-  , cRegionOf   :: StateId -> Q Region
   , cEventCon   :: Text -> Q Name
   , cEntryCon   :: Text -> Name
   , cExitCon    :: Text -> Name
   , cEventCount :: Int
-  }
-
--- | A region of a parallel state and the internal type standing for it. A
--- compound region wraps its group's type; an atomic one holds nothing.
-data Region = Region
-  { rNode  :: Node
-  , rType  :: Name
-  , rCon   :: Name
-  , rGroup :: Maybe Group
   }
 
 -- | The instance head and associated types every layer shares.
@@ -501,9 +493,10 @@ caseCovering scrut total alts dflt
         [match p (normalB e) [] | (p, e) <- alts]
           ++ [match wildP (normalB dflt) [] | length alts < total]
 
--- | The 'Fsm.Fsm' instance of one layer: the root, or a compound state's type.
+-- | The 'Fsm.Fsm' instance of one layer: the root, a compound state's type, or
+-- an atomic region's.
 groupInstance :: Ctx -> Group -> Q Dec
-groupInstance ctx@Ctx {cNameFor, cRegionOf, cEventCon, cEntryCon, cExitCon, cEventCount} Group {gType, gChildren} = do
+groupInstance ctx@Ctx {cNameFor, cEventCon, cEntryCon, cExitCon, cEventCount} Group {gType, gChildren} = do
   st <- newName "_st"
   ev <- newName "_ev"
   f <- newName "_f"
@@ -516,10 +509,21 @@ groupInstance ctx@Ctx {cNameFor, cRegionOf, cEventCon, cEntryCon, cExitCon, cEve
       sibling tgt = case find ((== tgt) . nodeId) gChildren of
         Just n -> pure n
         Nothing -> fail ("scxml: internal error, unknown transition target " ++ T.unpack tgt)
-      enter n = case nodeKind n of
-        Compound _ -> [| $(conE (con n)) Fsm.initialState |]
-        Parallel rs -> foldl appE (conE (con n)) [[| Fsm.initialState |] | Node {nodeKind = Compound _} <- NE.toList rs]
-        _ -> conE (con n)
+      -- How many layers below a child holds: its compound state's, or one per
+      -- region.
+      fieldCount n = case nodeKind n of
+        Compound _ -> 1
+        Parallel rs -> length rs
+        _ -> 0
+      regionsOf n = case nodeKind n of
+        Parallel rs -> NE.toList rs
+        _ -> []
+      -- A region is entered and left exactly when its parallel state is, so
+      -- its callbacks run with the parallel state's: after them on entry,
+      -- before them on exit.
+      entryActions n = nodeOnEntry n ++ concatMap nodeOnEntry (regionsOf n)
+      exitActions n = concatMap nodeOnExit (regionsOf n) ++ nodeOnExit n
+      enter n = foldl appE (conE (con n)) (replicate (fieldCount n) [| Fsm.initialState |])
       transitionsOf n = do
         alts <- forM (Map.toList (nodeTransitions n)) $ \(name, tgt) -> do
           c <- cEventCon name
@@ -528,90 +532,24 @@ groupInstance ctx@Ctx {cNameFor, cRegionOf, cEventCon, cEntryCon, cExitCon, cEve
         pure (caseCovering (varE ev) cEventCount alts [| Nothing |])
       actions conOf names = listE [conE (conOf a) | a <- names]
   nexts <- sequence [(,) (plain n) <$> transitionsOf n | n <- gChildren, not (Map.null (nodeTransitions n))]
-  substates <- fmap concat $ forM gChildren $ \n -> case nodeKind n of
-    Compound _ -> do
-      x <- newName "x"
-      x' <- newName "x'"
-      r <- newName "r"
-      pure
-        [ ( conP (con n) [varP x]
-          , letE [valD (tupP [varP x', varP r]) (normalB [| $(varE f) $(varE x) |]) []]
-              [| ($(conE (con n)) $(varE x'), $(varE r)) |]
-          )
-        ]
-    Parallel rs -> do
-      parts <- forM (NE.toList rs) $ \Node {nodeId = rid} -> do
-        Region {rCon, rGroup} <- cRegionOf rid
-        r <- newName "r"
-        case rGroup of
-          Just _ -> do
-            x <- newName "x"
-            x' <- newName "x'"
-            pure
-              ( Just (x, x')
-              , valD (tupP [conP rCon [varP x'], varP r]) (normalB [| $(varE f) ($(conE rCon) $(varE x)) |]) []
-              , varE r
-              )
-          Nothing -> pure (Nothing, valD (tupP [wildP, varP r]) (normalB [| $(varE f) $(conE rCon) |]) [], varE r)
-      let fields = [v | (Just v, _, _) <- parts]
-      pure
-        [ ( conP (con n) [varP x | (x, _) <- fields]
-          , letE [d | (_, d, _) <- parts] $
-              tupE
-                [ foldl appE (conE (con n)) [varE x' | (_, x') <- fields]
-                , foldr1 (\a b -> [| $a <> $b |]) [r | (_, _, r) <- parts]
-                ]
-          )
-        ]
-    _ -> pure []
+  substates <- forM [n | n <- gChildren, fieldCount n > 0] $ \n -> do
+    parts <- forM [1 .. fieldCount n] $ \_ -> (,,) <$> newName "x" <*> newName "x'" <*> newName "r"
+    pure
+      ( conP (con n) [varP x | (x, _, _) <- parts]
+      , letE [valD (tupP [varP x', varP r]) (normalB [| $(varE f) $(varE x) |]) [] | (x, x', r) <- parts] $
+          tupE
+            [ foldl appE (conE (con n)) [varE x' | (_, x', _) <- parts]
+            , foldr1 (\a b -> [| $a <> $b |]) [varE r | (_, _, r) <- parts]
+            ]
+      )
   fsmInstance ctx gType
     [ method 'Fsm.initialState [] (enter initial)
     , method 'Fsm.nextState [varP ev, varP st] (perChild nexts [| Nothing |])
-    , method 'Fsm.onEntry [varP st] (perChild [(plain n, actions cEntryCon (nodeOnEntry n)) | n <- gChildren, not (null (nodeOnEntry n))] [| [] |])
-    , method 'Fsm.onExit [varP st] (perChild [(plain n, actions cExitCon (nodeOnExit n)) | n <- gChildren, not (null (nodeOnExit n))] [| [] |])
+    , method 'Fsm.onEntry [varP st] (perChild [(plain n, actions cEntryCon (entryActions n)) | n <- gChildren, not (null (entryActions n))] [| [] |])
+    , method 'Fsm.onExit [varP st] (perChild [(plain n, actions cExitCon (exitActions n)) | n <- gChildren, not (null (exitActions n))] [| [] |])
     , method 'Fsm.isFinal [varP st] (perChild [(plain n, [| True |]) | n@Node {nodeKind = Final} <- gChildren] [| False |])
     , method 'Fsm.doneEvent [varP st] (perChild [(plain n, [| Just $(conE (doneCon n)) |]) | n <- gChildren, completes n] [| Nothing |])
     , method 'Fsm.applyToSubstates [varP st, varP f] (perChild substates [| ($(varE st), mempty) |])
-    ]
-
--- | A region's internal type and its instance. The region has no transitions
--- of its own (the parser rejects them), so all it adds to the layer below are
--- its callbacks and its done event.
-regionDecs' :: Ctx -> Region -> Q [Dec]
-regionDecs' ctx@Ctx {cEntryCon, cExitCon} Region {rNode, rType, rCon, rGroup} = do
-  x <- newName "x"
-  x' <- newName "x'"
-  r <- newName "r"
-  f <- newName "_f"
-  w <- newName "_w"
-  let plainField t = bangType (bang noSourceUnpackedness noSourceStrictness) (conT t)
-      Node {nodeOnEntry, nodeOnExit, nodeKind} = rNode
-      (dataDec, initial, final, substates) = case rGroup of
-        Just Group {gType} ->
-          ( newtypeD (cxt []) rType [] Nothing (normalC rCon [plainField gType]) []
-          , [| $(conE rCon) Fsm.initialState |]
-          , method 'Fsm.isFinal [conP rCon [varP x]] [| Fsm.isFinal $(varE x) |]
-          , method 'Fsm.applyToSubstates [conP rCon [varP x], varP f]
-              (letE [valD (tupP [varP x', varP r]) (normalB [| $(varE f) $(varE x) |]) []]
-                [| ($(conE rCon) $(varE x'), $(varE r)) |])
-          )
-        Nothing ->
-          ( dataD (cxt []) rType [] Nothing [normalC rCon []] []
-          , conE rCon
-          , method 'Fsm.isFinal [wildP] (if nodeKind == Final then [| True |] else [| False |])
-          , method 'Fsm.applyToSubstates [varP w, wildP] [| ($(varE w), mempty) |]
-          )
-  sequence
-    [ dataDec
-    , fsmInstance ctx rType
-        [ method 'Fsm.initialState [] initial
-        , method 'Fsm.nextState [wildP, wildP] [| Nothing |]
-        , method 'Fsm.onEntry [wildP] (listE [conE (cEntryCon a) | a <- nodeOnEntry])
-        , method 'Fsm.onExit [wildP] (listE [conE (cExitCon a) | a <- nodeOnExit])
-        , final
-        , method 'Fsm.doneEvent [wildP] (if completes rNode then [| Just $(conE (doneCon rNode)) |] else [| Nothing |])
-        , substates
-        ]
     ]
 
 -- | The constructor of a state's @done.state@ event, as the event type names it.

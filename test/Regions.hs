@@ -1,11 +1,13 @@
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE TypeFamilies #-}
--- | A parallel state's regions have callbacks of their own, and a region that
--- is an atomic state is active for as long as the parallel state is but can
--- never complete, so neither can the parallel state holding it.
+-- | A parallel state's regions have callbacks of their own, which run with the
+-- parallel state's, and a region that is an atomic state is active for as long
+-- as the parallel state is but can never complete, so neither can the parallel
+-- state holding it.
 module Regions where
 
 import Control.Monad.Trans.State.Strict (StateT, modify', runStateT)
+import qualified Data.Text as T
 import Scxml.Statechart (scxml)
 
 [scxml|
@@ -26,8 +28,8 @@ import Scxml.Statechart (scxml)
       </state>
       <final id="Stored"/>
     </state>
-    <!-- An atomic region: no field in Work's constructor, but its callbacks
-         still run, and it keeps Work from ever completing. -->
+    <!-- An atomic region: a field of its own one-constructor type, which
+         keeps Work from ever completing. -->
     <state id="Log">
       <onentry><script>enterLog</script></onentry>
       <onexit><script>exitLog</script></onexit>
@@ -41,8 +43,9 @@ import Scxml.Statechart (scxml)
 
 -- Generated:
 --
---   data FsmState = Idle | Work Upload | Finished
+--   data FsmState = Idle | Work Upload Log | Finished
 --   data Upload   = Uploading | Stored
+--   data Log      = Log
 
 type M = StateT [String] IO
 
@@ -77,15 +80,21 @@ spec = do
   (stored, _) <- run [Go, Uploaded]
   (stopped, stoppedLog) <- run [Go, Uploaded, Stop]
   pure
-    [ ("entering a parallel state enters every region", show (Work Uploading), show entered)
-    , ("a region's entry callbacks run before its children's, regions in document order"
-      , show ["enter Work", "enter Upload", "enter Uploading", "enter Log"]
+    [ ("entering a parallel state enters every region", show (Work Uploading Log), show entered)
+    , ("entry callbacks run by depth: the parallel state, its regions, then their children"
+      , show ["enter Work", "enter Upload", "enter Log", "enter Uploading"]
       , show enteredLog
       )
-    , ("an atomic region keeps the parallel state from completing", show (Work Stored), show stored)
-    , ("exit callbacks run innermost first, regions in document order"
+    , ("an atomic region keeps the parallel state from completing", show (Work Stored Log), show stored)
+    , ("exit callbacks run by depth, innermost first"
       , show (enteredLog ++ ["exit Uploading", "exit Upload", "exit Log", "exit Work"])
       , show stoppedLog
       )
     , ("leaving the parallel state", show Idle, show stopped)
+    , ("an atomic region is stored as its id"
+      , show (map T.pack ["Log", "Stored", "Upload", "Work"])
+      , show (serializeStateMachine (Work Stored Log))
+      )
+    , ("and read back", show (Just (Work Stored Log)), show (deserializeStateMachine (map T.pack ["Work", "Upload", "Stored", "Log"])))
+    , ("a parallel state missing its atomic region is rejected", show (Nothing :: Maybe FsmState), show (deserializeStateMachine (map T.pack ["Work", "Upload", "Stored"])))
     ]

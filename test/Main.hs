@@ -97,7 +97,6 @@ import qualified Reordered
 --   data FsmEvent   = Submit | Discard | Abandon | Valid | Invalid | Poll
 --                   | PaymentAuthorized | Packed | Paid | DoneFulfilment
 --                   | PaymentDeclined | DoneProcessing | Cancel
---                   | DoneShipping | DoneInvoicing
 --   initiateStateMachine, notifyStateMachine   -- signatures below are ours
 --   serializeStateMachine   :: FsmState -> [Text]
 --   deserializeStateMachine :: [Text] -> Maybe FsmState
@@ -281,8 +280,7 @@ main = do
     (Cancelled, Cancelled) (viaDiscard, viaAbandon)
   check "all events, in document order"
     [ Submit, Discard, Abandon, Valid, Invalid, Poll, PaymentAuthorized, Packed
-    , Paid, DoneFulfilment, PaymentDeclined, DoneProcessing, Cancel
-    , DoneShipping, DoneInvoicing ]
+    , Paid, DoneFulfilment, PaymentDeclined, DoneProcessing, Cancel ]
     [minBound .. maxBound :: FsmEvent]
 
   -- Serialization. Show/Read round-trips exactly; the id list is the portable
