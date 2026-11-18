@@ -337,7 +337,7 @@ generate src = do
              Fsm.FsmStep step -> $(conE stepCon) $(transitionOf [| step |]) |]
       -- Underscore-prefixed so that a chart with no callbacks of some phase
       -- does not emit an unused-match warning in the user's module.
-      dispatch cons marker fallback argOf
+      dispatch cons fallback argOf
         | null cons = [| \_ _ -> $fallback |]
         | otherwise = do
             action <- newName "_action"
@@ -346,11 +346,11 @@ generate src = do
             lamE [varP action, varP raw] $
               letE [valD (varP arg) (normalB (argOf (varE raw))) []] $
                 caseE (varE action)
-                  [ match (conP c []) (normalB [| $marker ($(varE (mkName (T.unpack fn))) $(varE arg)) |]) []
+                  [ match (conP c []) (normalB [| $(varE (mkName (T.unpack fn))) $(varE arg) |]) []
                   | (fn, c) <- cons
                   ]
-      entryD = dispatch entryCons [| Fsm.entryAction |] [| pure Nothing |] entryOf
-      exitD = dispatch exitCons [| Fsm.exitAction |] [| pure () |] transitionOf
+      entryD = dispatch entryCons [| pure Nothing |] entryOf
+      exitD = dispatch exitCons [| pure () |] transitionOf
   startDec <-
     valD (varP startName)
       (normalB [| fmap (\st -> st :: $(conT stateT)) (Fsm.initiate $entryD $exitD) |])

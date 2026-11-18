@@ -18,8 +18,6 @@ module Scxml.Statechart.Fsm
   , FsmEntry (..)
   , initiate
   , consumeEvents
-  , entryAction
-  , exitAction
   ) where
 
 import           Control.Monad (when)
@@ -39,18 +37,6 @@ data FsmTransition state event = FsmTransition
 
 -- | What an entry callback runs in: starting the chart, or a step.
 data FsmEntry state event = FsmStart state | FsmStep (FsmTransition state event)
-
--- | Marks an entry callback, which returns the event it raises, if any.
--- Raised events are queued and processed before the current step returns,
--- like SCXML's @<raise>@. Only here so that a callback with the wrong type
--- gets an error pointing at it.
-entryAction :: m (Maybe ev) -> m (Maybe ev)
-entryAction = id
-
--- | Marks an exit callback, which may not raise events. Only here so that a
--- callback with the wrong type gets an error pointing at it.
-exitAction :: m () -> m ()
-exitAction = id
 
 -- | One layer of a chart. The generated instances live in the chart's module,
 -- so that module needs @TypeFamilies@ for the associated types, which the
