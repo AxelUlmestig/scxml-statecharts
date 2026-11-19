@@ -57,21 +57,21 @@
 -- Haskell, prefer the generated @serializeStateMachine@ over @Show@.
 module Scxml.Statechart.TH (scxml) where
 
-import Control.Monad (filterM, forM, forM_, unless)
-import Data.Char (isAlphaNum, isLower, isUpper)
-import Data.List (find, intercalate, nub)
-import qualified Data.Map.Strict as Map
-import qualified Data.List.NonEmpty as NE
-import qualified Data.Set as Set
-import Data.Text (Text)
-import qualified Data.Text as T
-import Language.Haskell.TH
-import Language.Haskell.TH.Quote
-import Language.Haskell.TH.Syntax (lift)
+import           Control.Monad              (filterM, forM, forM_, unless)
+import           Data.Char                  (isAlphaNum, isLower, isUpper)
+import           Data.List                  (find, intercalate, nub)
+import qualified Data.List.NonEmpty         as NE
+import qualified Data.Map.Strict            as Map
+import qualified Data.Set                   as Set
+import           Data.Text                  (Text)
+import qualified Data.Text                  as T
+import           Language.Haskell.TH
+import           Language.Haskell.TH.Quote
+import           Language.Haskell.TH.Syntax (lift)
 
-import qualified Scxml.Statechart.Fsm as Fsm
-import Scxml.Statechart.Model
-import Scxml.Statechart.Parse
+import qualified Scxml.Statechart.Fsm       as Fsm
+import           Scxml.Statechart.Model
+import           Scxml.Statechart.Parse
 
 -- | Turns SCXML into a statechart. Usable only at the top level of a module,
 -- where it declares the state and event types and the functions that run the
@@ -168,45 +168,77 @@ generate src = do
   -- The instances generated below have two parameters and associated types,
   -- which GHC checks against the extensions of the module they are spliced
   -- into. Without this it would report each missing one once per instance.
-  missing <- filterM (fmap not . isExtEnabled) [MultiParamTypeClasses, TypeFamilies]
-  unless (null missing) $
-    fail $
-      "scxml: the module needs " ++ unwords (map show missing)
-        ++ " for the instances the chart runs on. Add {-# LANGUAGE " ++ intercalate ", " (map show missing) ++ " #-}."
+  do
+    missing <- filterM (fmap not . isExtEnabled) [MultiParamTypeClasses, TypeFamilies]
+    unless (null missing) $
+      fail $
+        "scxml: the module needs " ++ unwords (map show missing)
+          ++ " for the instances the chart runs on. Add {-# LANGUAGE " ++ intercalate ", " (map show missing) ++ " #-}."
+
   ch <- orFail (parseScxml src)
-  -- Everything here is a walk of the tree: a node carries its own children,
-  -- so nothing needs looking up by id.
-  let states = chartStates ch
-  let stateT = mkName "FsmState"
-      eventT = mkName "FsmEvent"
-      transitionT = mkName "FsmTransition"
-      entryT = mkName "FsmEntry"
-      startCon = mkName "FsmStart"
-      stepCon = mkName "FsmStep"
-      fromField = mkName "transitionFrom"
-      eventField = mkName "transitionEvent"
-      toField = mkName "transitionTo"
-      startName = mkName "initiateStateMachine"
-      stepName = mkName "notifyStateMachine"
-      toIdsName = mkName "serializeStateMachine"
-      fromIdsName = mkName "deserializeStateMachine"
-      -- A compound state's type has the same name as its constructor; Haskell
-      -- keeps types and constructors in separate namespaces.
-      nameFor sid = mkName (T.unpack sid)
-      compounds = [n | n <- states, Compound _ <- [nodeKind n]]
-      regionNodes = [r | Node {nodeKind = Parallel rs} <- states, r <- NE.toList rs]
-      atomicRegions = [r | r@Node {nodeKind = Atomic} <- regionNodes]
 
-  -- Callback names
-  let entryActions = nub (concatMap nodeOnEntry states)
-      exitActions = nub (concatMap nodeOnExit states)
-  mapM_ (orFail . checkVarName) (nub (entryActions ++ exitActions))
+  (eventsPart, eventCon, eventCount) <- generateEvents ch
+  (actionsPart, actions@Actions {aEntryT, aExitT, aEntry, aExit}) <- generateActions ch
+  let ctx =
+        Ctx
+          { cEntryActT = aEntryT
+          , cExitActT = aExitT
+          , cEventCon = eventCon
+          , cEntryCon = \fn -> maybe (error "scxml: internal error, unknown entry callback") id (lookup fn aEntry)
+          , cExitCon = \fn -> maybe (error "scxml: internal error, unknown exit callback") id (lookup fn aExit)
+          , cEventCount = eventCount
+          }
+  (statesPart, root) <- generateStates ch ctx
+  runningPart <- generateRunning actions
+  serializationPart <- generateSerialization root
 
-  -- Events: those named in transitions, in document order, then done events of
-  -- states that can complete but that no transition mentions. A region cannot
-  -- have transitions, so nothing could react to its done event.
+  -- Nothing reaches the user's module until this returns, so a clash between
+  -- the parts' names is caught here, with a readable error instead of GHC's
+  -- "Multiple declarations". The order of the parts is the order a clash
+  -- lists where its names came from; the declarations' order does not matter.
+  let Part {partDecs, partCons, partTypes} = mconcat [runningPart, statesPart, eventsPart, actionsPart, serializationPart]
+  checkClashes "constructor" partCons
+  checkClashes "type" partTypes
+  pure partDecs
+
+-- | What one part of the chart generates: its declarations, and the
+-- constructors and types among them, each with where it came from, for
+-- 'generate' to check for clashes across all parts.
+data Part = Part
+  { partDecs  :: [Dec]
+  , partCons  :: [(Name, String)]
+  , partTypes :: [(Name, String)]
+  }
+
+instance Semigroup Part where
+  Part decs cons types <> Part decs' cons' types' = Part (decs ++ decs') (cons ++ cons') (types ++ types')
+
+instance Monoid Part where
+  mempty = Part [] [] []
+
+stateT, eventT :: Name
+stateT = mkName "FsmState"
+eventT = mkName "FsmEvent"
+
+-- | The constructor of a state, and the type of a compound state or atomic
+-- region. The two share a name; Haskell keeps types and constructors in
+-- separate namespaces.
+nameFor :: StateId -> Name
+nameFor = mkName . T.unpack
+
+-- | Every region of every parallel state.
+chartRegions :: Chart -> [Node]
+chartRegions ch = [r | Node {nodeKind = Parallel rs} <- chartStates ch, r <- NE.toList rs]
+
+-- | @FsmEvent@: the events named in transitions, in document order, then the
+-- done events of states that can complete but that no transition mentions. A
+-- region cannot have transitions, so nothing could react to its done event.
+-- Also returns each event's constructor by its SCXML name, and how many
+-- events there are.
+generateEvents :: Chart -> Q (Part, Text -> Q Name, Int)
+generateEvents ch = do
   let referenced = chartEvents ch
-      completing = [n | n <- states, completes n, nodeId n `notElem` map nodeId regionNodes]
+      completing = [n | n <- chartStates ch, completes n, nodeId n `notElem` map nodeId (chartRegions ch)]
       doneEvents = [Event (T.pack "done.state." <> nodeId) [] | Node {nodeId} <- completing]
       events = referenced ++ filter ((`notElem` map eventName referenced) . eventName) doneEvents
       -- (constructor, payload type names, what it came from, wire name)
@@ -215,7 +247,6 @@ generate src = do
           Just sid -> (mkName ("Done" ++ T.unpack sid), [], "completion event " ++ show (T.unpack name), name)
           Nothing -> (mkName (T.unpack name), eventFields, "event " ++ show (T.unpack name), name)
       eventInfos = map eventInfo events
-      eventCons = [(c, origin) | (c, _, origin, _) <- eventInfos]
       -- Enum and Bounded need every constructor nullary, and Ord would make
       -- the whole chart fail to compile over a payload type that has no
       -- instance, so an event carrying data costs all three.
@@ -223,7 +254,60 @@ generate src = do
         | null eventInfos = [''Show, ''Read, ''Eq, ''Ord]
         | any (\(_, fs, _, _) -> not (null fs)) eventInfos = [''Show, ''Read, ''Eq]
         | otherwise = [''Show, ''Read, ''Eq, ''Ord, ''Enum, ''Bounded]
+  -- An event spelled like a completion event is almost always meant as one,
+  -- and the clash it would cause says nothing about done.state.
+  forM_ [(name, nodeId) | Event {eventName = name} <- referenced, Node {nodeId} <- completing, name == T.pack "Done" <> nodeId] $ \(name, sid) ->
+    fail $
+      "scxml: event " ++ show (T.unpack name) ++ " has the name generated for " ++ T.unpack sid
+        ++ "'s completion event. To react to " ++ T.unpack sid ++ " completing, write event=\"done.state."
+        ++ T.unpack sid ++ "\"; otherwise rename the event."
+  eventDec <-
+    dataD (cxt []) eventT [] Nothing
+      [ normalC c [bangType (bang noSourceUnpackedness noSourceStrictness) (conT (mkName (T.unpack f))) | f <- fs]
+      | (c, fs, _, _) <- eventInfos
+      ]
+      [derivClause Nothing (map conT eventDerivs)]
+  let cons = Map.fromList [(name, c) | (c, _, _, name) <- eventInfos]
+      conOf name = maybe (fail ("scxml: internal error, no constructor for event " ++ T.unpack name)) pure (Map.lookup name cons)
+  pure
+    ( Part [eventDec] [(c, origin) | (c, _, origin, _) <- eventInfos] [(eventT, "the event type")]
+    , conOf
+    , length eventInfos
+    )
 
+-- | The two enumerations that name callbacks in the instances, one
+-- constructor per callback, paired with the callback's name.
+data Actions = Actions
+  { aEntryT :: Name
+  , aExitT  :: Name
+  , aEntry  :: [(Text, Name)]
+  , aExit   :: [(Text, Name)]
+  }
+
+-- | The generated functions map each action constructor to the callback of
+-- that name. That keeps the callbacks' monad out of the instances, so it is
+-- inferred rather than declared. The names come from newName, so they cannot
+-- clash with anything.
+generateActions :: Chart -> Q (Part, Actions)
+generateActions ch = do
+  let entryActions = nub (concatMap nodeOnEntry (chartStates ch))
+      exitActions = nub (concatMap nodeOnExit (chartStates ch))
+  mapM_ (orFail . checkVarName) (nub (entryActions ++ exitActions))
+  entryActT <- newName "FsmEntryAction"
+  exitActT <- newName "FsmExitAction"
+  entryCons <- forM entryActions $ \fn -> (,) fn <$> newName ("OnEntry_" ++ mangle fn)
+  exitCons <- forM exitActions $ \fn -> (,) fn <$> newName ("OnExit_" ++ mangle fn)
+  let enumDec ty cons = dataD (cxt []) ty [] Nothing [normalC c [] | (_, c) <- cons] []
+  decs <- sequence [enumDec entryActT entryCons, enumDec exitActT exitCons]
+  pure (Part decs [] [], Actions entryActT exitActT entryCons exitCons)
+
+-- | @FsmState@ and a type for each compound state and atomic region, each with
+-- its configuration conversions and its 'Fsm.Fsm' instance. Also returns the
+-- root's group, whose conversions serialization builds on.
+generateStates :: Chart -> Ctx -> Q (Part, Group)
+generateStates ch ctx = do
+  let compounds = [n | n <- chartStates ch, Compound _ <- [nodeKind n]]
+      atomicRegions = [r | r@Node {nodeKind = Atomic} <- chartRegions ch]
   -- An atomic region is a field of its parallel state like any other region,
   -- so it gets a type whose only constructor is itself. Its callbacks run with
   -- the parallel state's, so they are left out of that type's instance.
@@ -237,46 +321,39 @@ generate src = do
           Just n -> nodeChildren n
     pure (g, Group ty children to from)
   let groupMap = Map.fromList [(nodeId, grp) | (Just Node {nodeId}, grp) <- groups]
-  Group {gTo = rootTo, gFrom = rootFrom} <- case groups of
+  root <- case groups of
     (_, g) : _ -> pure g
-    [] -> fail "scxml: internal error, no root group"
+    []         -> fail "scxml: internal error, no root group"
   let groupOf sid = case Map.lookup sid groupMap of
         Just grp -> pure grp
         Nothing -> fail ("scxml: internal error, no group for " ++ T.unpack sid)
-
-  -- Every generated constructor and type, with its origin, so clashes give a
-  -- readable error instead of "Multiple declarations".
-  let stateCons =
+  typeDecs <- concat <$> mapM (groupDecs groupOf . snd) groups
+  instances <- mapM (groupInstance ctx . snd) groups
+  let cons =
         [ (nameFor nodeId, "state " ++ show (T.unpack nodeId))
         | (_, Group {gChildren}) <- groups
         , Node {nodeId} <- gChildren
         ]
-      typeNames =
-        [ (stateT, "the state type"), (eventT, "the event type")
-        , (transitionT, "the transition type"), (entryT, "the entry type") ]
-          ++ [ (gType, what ++ show (T.unpack nodeId))
-             | (Just Node {nodeId, nodeKind}, Group {gType}) <- groups
-             , let what = if nodeKind == Atomic then "region " else "compound state "
-             ]
-  -- An event spelled like a completion event is almost always meant as one,
-  -- and the clash it would cause says nothing about done.state.
-  forM_ [(name, nodeId) | Event {eventName = name} <- referenced, Node {nodeId} <- completing, name == T.pack "Done" <> nodeId] $ \(name, sid) ->
-    fail $
-      "scxml: event " ++ show (T.unpack name) ++ " has the name generated for " ++ T.unpack sid
-        ++ "'s completion event. To react to " ++ T.unpack sid ++ " completing, write event=\"done.state."
-        ++ T.unpack sid ++ "\"; otherwise rename the event."
-  checkClashes "constructor"
-    ( [(transitionT, "the transition type"), (startCon, "the entry type"), (stepCon, "the entry type")]
-        ++ stateCons ++ eventCons )
-  checkClashes "type" typeNames
+      types =
+        (stateT, "the state type")
+          : [ (gType, what ++ show (T.unpack nodeId))
+            | (Just Node {nodeId, nodeKind}, Group {gType}) <- groups
+            , let what = if nodeKind == Atomic then "region " else "compound state "
+            ]
+  pure (Part (typeDecs ++ instances) cons types, root)
 
-  stateDecs <- concat <$> mapM (groupDecs nameFor groupOf . snd) groups
-  eventDec <-
-    dataD (cxt []) eventT [] Nothing
-      [ normalC c [bangType (bang noSourceUnpackedness noSourceStrictness) (conT (mkName (T.unpack f))) | f <- fs]
-      | (c, fs, _, _) <- eventInfos
-      ]
-      [derivClause Nothing (map conT eventDerivs)]
+-- | What callbacks receive, and the functions the user calls to run the chart.
+generateRunning :: Actions -> Q Part
+generateRunning Actions {aEntry, aExit} = do
+  let transitionT = mkName "FsmTransition"
+      entryT = mkName "FsmEntry"
+      startCon = mkName "FsmStart"
+      stepCon = mkName "FsmStep"
+      fromField = mkName "transitionFrom"
+      eventField = mkName "transitionEvent"
+      toField = mkName "transitionTo"
+      startName = mkName "initiateStateMachine"
+      stepName = mkName "notifyStateMachine"
   -- What callbacks receive. A record rather than positional arguments, so a
   -- callback names what it reads and ignores the rest. An exit callback only
   -- runs inside a step, so it gets the record itself; an entry callback may
@@ -297,43 +374,18 @@ generate src = do
       [normalC startCon [plain stateT], normalC stepCon [plain transitionT]]
       [derivClause Nothing (map conT [''Show, ''Read, ''Eq])]
 
-  -- Callbacks are named in the instances by constructors of two internal
-  -- enumerations, and the generated functions map each constructor to the
-  -- callback of that name. That keeps the callbacks' monad out of the
-  -- instances, so it is inferred rather than declared.
-  entryActT <- newName "FsmEntryAction"
-  exitActT <- newName "FsmExitAction"
-  entryCons <- forM entryActions $ \fn -> (,) fn <$> newName ("OnEntry_" ++ mangle fn)
-  exitCons <- forM exitActions $ \fn -> (,) fn <$> newName ("OnExit_" ++ mangle fn)
-  let enumDec ty cons = dataD (cxt []) ty [] Nothing [normalC c [] | (_, c) <- cons] []
-  actionDecs <- sequence [enumDec entryActT entryCons, enumDec exitActT exitCons]
-
-  let eventCons' = Map.fromList [(name, c) | (c, _, _, name) <- eventInfos]
-      ctx =
-        Ctx
-          { cEventT = eventT
-          , cEntryActT = entryActT
-          , cExitActT = exitActT
-          , cNameFor = nameFor
-          , cEventCon = \name -> maybe (fail ("scxml: internal error, no constructor for event " ++ T.unpack name)) pure (Map.lookup name eventCons')
-          , cEntryCon = \fn -> maybe (error "scxml: internal error, unknown entry callback") id (lookup fn entryCons)
-          , cExitCon = \fn -> maybe (error "scxml: internal error, unknown exit callback") id (lookup fn exitCons)
-          , cEventCount = length eventInfos
-          }
-  groupInstances <- mapM (groupInstance ctx . snd) groups
-
-  -- The functions the user calls. The dispatchers are inlined into each
-  -- rather than shared, so a polymorphic monad does not hit the monomorphism
-  -- restriction. What a callback receives is converted to the chart's own
-  -- FsmEntry and FsmTransition, so that a chart needs no imports; that
-  -- conversion is also what tells the engine which state type it is running,
-  -- since the callback names are shared by every layer and so cannot. A chart
-  -- with no callbacks gets the same from the annotations below.
+  -- The dispatchers are inlined into each function rather than shared, so a
+  -- polymorphic monad does not hit the monomorphism restriction. What a
+  -- callback receives is converted to the chart's own FsmEntry and
+  -- FsmTransition, so that a chart needs no imports; that conversion is also
+  -- what tells the engine which state type it is running, since the callback
+  -- names are shared by every layer and so cannot. A chart with no callbacks
+  -- gets the same from the annotations below.
   let transitionOf t =
         [| $(conE transitionT) (Fsm.transitionFrom $t) (Fsm.transitionEvent $t) (Fsm.transitionTo $t) |]
       entryOf e =
         [| case $e of
-             Fsm.FsmStart st -> $(conE startCon) st
+             Fsm.FsmStart st  -> $(conE startCon) st
              Fsm.FsmStep step -> $(conE stepCon) $(transitionOf [| step |]) |]
       -- Underscore-prefixed so that a chart with no callbacks of some phase
       -- does not emit an unused-match warning in the user's module.
@@ -349,8 +401,8 @@ generate src = do
                   [ match (conP c []) (normalB [| $(varE (mkName (T.unpack fn))) $(varE arg) |]) []
                   | (fn, c) <- cons
                   ]
-      entryD = dispatch entryCons [| pure Nothing |] entryOf
-      exitD = dispatch exitCons [| pure () |] transitionOf
+      entryD = dispatch aEntry [| pure Nothing |] entryOf
+      exitD = dispatch aExit [| pure () |] transitionOf
   startDec <-
     valD (varP startName)
       (normalB [| fmap (\st -> st :: $(conT stateT)) (Fsm.initiate $entryD $exitD) |])
@@ -363,12 +415,22 @@ generate src = do
           (normalB [| Fsm.consumeEvents $entryD $exitD [$(varE ev)] ($(varE st) :: $(conT stateT)) |])
           []
       ]
+  pure
+    ( Part
+        [transitionDec, entryDec, startDec, stepDec]
+        [(transitionT, "the transition type"), (startCon, "the entry type"), (stepCon, "the entry type")]
+        [(transitionT, "the transition type"), (entryT, "the entry type")]
+    )
 
-  -- Storing a state outside Haskell, as the set of active state ids. Generated
-  -- rather than exported so that a chart needs no imports beyond the
-  -- quasiquoter itself.
-  let toCfg = varE rootTo
-      fromCfg = varE rootFrom
+-- | Storing a state outside Haskell, as the set of active state ids. Generated
+-- rather than exported so that a chart needs no imports beyond the
+-- quasiquoter itself.
+generateSerialization :: Group -> Q Part
+generateSerialization Group {gTo, gFrom} = do
+  let toIdsName = mkName "serializeStateMachine"
+      fromIdsName = mkName "deserializeStateMachine"
+      toCfg = varE gTo
+      fromCfg = varE gFrom
   toIdsSig <- sigD toIdsName [t| $(conT stateT) -> [Text] |]
   toIdsDec <- do
     x <- newName "st"
@@ -386,14 +448,11 @@ generate src = do
                    Just $(varP st) | $toCfg $(varE st) == $(varE given) -> Just $(varE st)
                    _ -> Nothing |]
     funD fromIdsName [clause [varP ids] (normalB body) []]
-
-  pure
-    ( stateDecs ++ [eventDec, transitionDec, entryDec] ++ actionDecs ++ groupInstances
-        ++ [startDec, stepDec, toIdsSig, toIdsDec, fromIdsSig, fromIdsDec] )
+  pure (Part [toIdsSig, toIdsDec, fromIdsSig, fromIdsDec] [] [])
 
 -- | Data type plus configuration conversions for one compound-like node.
-groupDecs :: (StateId -> Name) -> (StateId -> Q Group) -> Group -> Q [Dec]
-groupDecs nameFor groupOf Group {gType, gChildren, gTo, gFrom} = do
+groupDecs :: (StateId -> Q Group) -> Group -> Q [Dec]
+groupDecs groupOf Group {gType, gChildren, gTo, gFrom} = do
   shapes <- mapM childShape gChildren
   let dataDec =
         dataD (cxt []) gType [] Nothing
@@ -461,10 +520,8 @@ groupDecs nameFor groupOf Group {gType, gChildren, gTo, gFrom} = do
 
 -- | What generating an instance needs to know about the rest of the chart.
 data Ctx = Ctx
-  { cEventT     :: Name
-  , cEntryActT  :: Name
+  { cEntryActT  :: Name
   , cExitActT   :: Name
-  , cNameFor    :: StateId -> Name
   , cEventCon   :: Text -> Q Name
   , cEntryCon   :: Text -> Name
   , cExitCon    :: Text -> Name
@@ -473,8 +530,8 @@ data Ctx = Ctx
 
 -- | The instance head and associated types every layer shares.
 fsmInstance :: Ctx -> Name -> [Q Dec] -> Q Dec
-fsmInstance Ctx {cEventT, cEntryActT, cExitActT} ty methods =
-  instanceD (cxt []) [t| Fsm.Fsm $(conT ty) $(conT cEventT) |] $
+fsmInstance Ctx {cEntryActT, cExitActT} ty methods =
+  instanceD (cxt []) [t| Fsm.Fsm $(conT ty) $(conT eventT) |] $
     tySynInstD (tySynEqn Nothing [t| Fsm.EntryAction $(conT ty) |] (conT cEntryActT))
       : tySynInstD (tySynEqn Nothing [t| Fsm.ExitAction $(conT ty) |] (conT cExitActT))
       : methods
@@ -496,14 +553,14 @@ caseCovering scrut total alts dflt
 -- | The 'Fsm.Fsm' instance of one layer: the root, a compound state's type, or
 -- an atomic region's.
 groupInstance :: Ctx -> Group -> Q Dec
-groupInstance ctx@Ctx {cNameFor, cEventCon, cEntryCon, cExitCon, cEventCount} Group {gType, gChildren} = do
+groupInstance ctx@Ctx {cEventCon, cEntryCon, cExitCon, cEventCount} Group {gType, gChildren} = do
   st <- newName "_st"
   ev <- newName "_ev"
   f <- newName "_f"
   initial <- case gChildren of
     c : _ -> pure c
-    [] -> fail "scxml: internal error, a group without children"
-  let con = cNameFor . nodeId
+    []    -> fail "scxml: internal error, a group without children"
+  let con = nameFor . nodeId
       plain n = recP (con n) []
       perChild alts dflt = caseCovering (varE st) (length gChildren) alts dflt
       sibling tgt = case find ((== tgt) . nodeId) gChildren of
@@ -512,12 +569,12 @@ groupInstance ctx@Ctx {cNameFor, cEventCon, cEntryCon, cExitCon, cEventCount} Gr
       -- How many layers below a child holds: its compound state's, or one per
       -- region.
       fieldCount n = case nodeKind n of
-        Compound _ -> 1
+        Compound _  -> 1
         Parallel rs -> length rs
-        _ -> 0
+        _           -> 0
       regionsOf n = case nodeKind n of
         Parallel rs -> NE.toList rs
-        _ -> []
+        _           -> []
       -- A region is entered and left exactly when its parallel state is, so
       -- its callbacks run with the parallel state's: after them on entry,
       -- before them on exit.
@@ -571,7 +628,7 @@ checkClashes what named = do
         : ["  " ++ n ++ " would be generated for " ++ commaList (reverse os) | (n, os) <- clashes]
   where
     commaList [a, b] = a ++ " and " ++ b
-    commaList xs = foldr1 (\a b -> a ++ ", " ++ b) xs
+    commaList xs     = foldr1 (\a b -> a ++ ", " ++ b) xs
 
 -- | Callback names in @<script>@ must be Haskell variable names, optionally
 -- qualified (@Inventory.reserve@).
