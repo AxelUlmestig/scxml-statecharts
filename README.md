@@ -7,7 +7,9 @@ state type is exactly one legal configuration: illegal states are
 unrepresentable and `case` is exhaustive.
 
 The library exports one name, the `scxml` quasiquoter. Everything a chart needs
-is generated into your own module.
+is generated into your own module, which needs `TypeFamilies` and
+`MultiParamTypeClasses` for the instances the chart runs on. GHC2021 enables
+the second; the quasiquoter says which are missing.
 
 ## Example
 
@@ -15,6 +17,7 @@ A monitor that polls something and reports when it is healthy:
 
 ```haskell
 {-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE TypeFamilies #-}
 module Monitor where
 
 import Scxml.Statechart (scxml)
@@ -75,6 +78,10 @@ notifyStateMachine      -- deliver one event
 serializeStateMachine   :: FsmState -> [Text]
 deserializeStateMachine :: [Text] -> Maybe FsmState
 ```
+
+It also generates an instance of the library's internal `Fsm` class for
+`FsmState` and for each compound state's type, which is what the two functions
+run on, and a few internal types those instances need.
 
 A compound state becomes a constructor carrying a sum type of the same name,
 which Haskell allows since types and constructors live in separate namespaces.
@@ -194,6 +201,14 @@ A few things to know:
 first, then `<onentry>` callbacks of entered states, outermost first. It then
 processes raised events the same way until none is left, and returns.
 
+A region of a `<parallel>` is entered and left exactly when the parallel state
+is, so its callbacks run with the parallel state's, and the order goes by
+depth: on entry the parallel state, then each region in document order, then
+what is inside the regions; on exit the same, innermost first. SCXML instead
+finishes one region, children and all, before starting the next. Only callbacks
+in sibling regions that depend on each other's effects can tell the
+difference, and those are better off raising an event.
+
 An event with no matching transition in the current state is ignored, as in
 SCXML: the state comes back unchanged and nothing runs. A poll result arriving
 after the chart moved on is the typical case. A raised event nothing handles is
@@ -253,12 +268,14 @@ time. That is how a parallel state completes:
 data FsmState = Fulfilment Parcel Invoice | Complete
 data Parcel   = Packing | Shipped
 data Invoice  = Unpaid | Settled
-data FsmEvent = Packed | Paid | DoneFulfilment | DoneParcel | DoneInvoice
+data FsmEvent = Packed | Paid | DoneFulfilment
 ```
 
 The parallel state is a product, so both regions advance independently and the
 type cannot represent one of them being absent. `done.state.X` becomes the
-constructor `DoneX`. Whichever region finishes second fires it:
+constructor `DoneX`, for every state that can complete except a region, which
+cannot have transitions and so could never react to it. Whichever region
+finishes second fires `DoneFulfilment`:
 
 ```haskell
 Fulfilment Packing Unpaid  --Packed-->  Fulfilment Shipped Unpaid  --Paid-->  Complete

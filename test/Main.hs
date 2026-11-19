@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE TypeFamilies #-}
 module Main (main) where
 
 import Control.Monad (unless, when)
@@ -11,8 +12,10 @@ import System.Exit (exitFailure)
 
 -- The library's entire public API.
 import Scxml.Statechart (scxml)
+import qualified Completion
 import qualified Overrides
 import qualified Payloads
+import qualified Regions
 import qualified Reordered
 
 -- An order process: compound states, a parallel state that completes via
@@ -94,7 +97,6 @@ import qualified Reordered
 --   data FsmEvent   = Submit | Discard | Abandon | Valid | Invalid | Poll
 --                   | PaymentAuthorized | Packed | Paid | DoneFulfilment
 --                   | PaymentDeclined | DoneProcessing | Cancel
---                   | DoneShipping | DoneInvoicing
 --   initiateStateMachine, notifyStateMachine   -- signatures below are ours
 --   serializeStateMachine   :: FsmState -> [Text]
 --   deserializeStateMachine :: [Text] -> Maybe FsmState
@@ -278,8 +280,7 @@ main = do
     (Cancelled, Cancelled) (viaDiscard, viaAbandon)
   check "all events, in document order"
     [ Submit, Discard, Abandon, Valid, Invalid, Poll, PaymentAuthorized, Packed
-    , Paid, DoneFulfilment, PaymentDeclined, DoneProcessing, Cancel
-    , DoneShipping, DoneInvoicing ]
+    , Paid, DoneFulfilment, PaymentDeclined, DoneProcessing, Cancel ]
     [minBound .. maxBound :: FsmEvent]
 
   -- Serialization. Show/Read round-trips exactly; the id list is the portable
@@ -303,7 +304,9 @@ main = do
   reordered <- Reordered.spec
   overrides <- Overrides.spec
   payloads <- Payloads.spec
-  mapM_ (\(label, expected, actual) -> check label expected actual) (reordered ++ overrides ++ payloads)
+  regions <- Regions.spec
+  completion <- Completion.spec
+  mapM_ (\(label, expected, actual) -> check label expected actual) (reordered ++ overrides ++ payloads ++ regions ++ completion)
 
   n <- readIORef failures
   when (n > 0) exitFailure

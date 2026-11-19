@@ -1,4 +1,5 @@
 {-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE TypeFamilies #-}
 -- | A chart whose initial states are deliberately not written first, to pin
 -- what that does to the generated types. The model keeps a compound state's
 -- children with the initial one first, so a compound state cannot name an

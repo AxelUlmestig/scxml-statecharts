@@ -22,7 +22,9 @@
 -- > deserializeStateMachine :: [Text] -> Maybe FsmState
 --
 -- This module exports only the quasiquoter. Everything a chart needs is
--- generated into your own module, so there is nothing else to import.
+-- generated into your own module, so there is nothing else to import. The
+-- module does need @TypeFamilies@ and @MultiParamTypeClasses@ (which GHC2021
+-- enables) for the instances the generated functions run on.
 module Scxml.Statechart (scxml) where
 
 import Scxml.Statechart.TH (scxml)

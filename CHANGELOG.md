@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.4.0.0 -- 2026-11-17
+
+- The generated code no longer hands an untyped copy of the chart to an
+  interpreter. Each layer of the chart, meaning `FsmState` and the type of each
+  compound state, gets an instance of an internal `Fsm` class, and a step is a
+  `case` per layer instead of set operations on state ids. Callbacks
+  are named in those instances by generated enumerations, and the generated
+  functions map each one to its callback, so the monad is still inferred from
+  the callbacks.
+- **Breaking.** A chart module needs `TypeFamilies`, for the generated
+  instances' associated types, and `MultiParamTypeClasses`, which GHC2021
+  enables. The quasiquoter names whichever is missing.
+- **Breaking.** `fsmChart` is no longer generated, and the `Def` it built is
+  gone, along with the interpreter it was for.
+- **Breaking.** An atomic region of a parallel state is now a field of the
+  parallel state's constructor, of a generated type with the region as its
+  only constructor: `Work Upload Log`, with `data Log = Log`, where it used to
+  be `Work Upload`. The stored form from `serializeStateMachine` is unchanged.
+- **Breaking.** A region's own callbacks run with its parallel state's, so
+  entry goes by depth: the parallel state, then every region, then what is
+  inside the regions. A region's children used to be entered before the next
+  region. Exit is the same, innermost first.
+- **Breaking.** A region no longer gets a `DoneX` event. A region cannot have
+  transitions, so nothing could react to it.
+- An event named `DoneX`, where `X` can complete, is rejected with a pointer to
+  `done.state.X` instead of a generic name clash.
+- A done event is now queued after the events the entry callbacks of its step
+  raise, rather than straight after the entry callbacks of the state that
+  completed. Only a step that both raises an event and completes a state sees
+  a different order.
+
 ## 0.3.0.0 -- 2026-11-13
 
 - **Breaking.** A callback now takes one argument describing the step it runs

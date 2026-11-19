@@ -1,7 +1,5 @@
-{-# LANGUAGE DeriveLift #-}
 -- | The untyped statechart model. This is what the SCXML parser produces and
--- what the evaluator runs on. The Template Haskell layer generates typed
--- wrappers around it.
+-- what the Template Haskell layer generates the typed chart from.
 --
 -- The chart is a tree and nothing else: a state owns its children, so a
 -- dangling child cannot be represented, and there is no parent link or
@@ -27,7 +25,6 @@ import Data.List.NonEmpty (NonEmpty ((:|)))
 import qualified Data.List.NonEmpty as NE
 import Data.Map.Strict (Map)
 import Data.Text (Text)
-import Language.Haskell.TH.Syntax (Lift)
 
 -- | A state's @id@ attribute, which is also its Haskell constructor name.
 type StateId = Text
@@ -45,7 +42,7 @@ data Kind
   | Compound (NonEmpty Node)
   | Parallel (NonEmpty Node)
   | Final
-  deriving (Eq, Show, Lift)
+  deriving (Eq, Show)
 
 -- | One state and everything inside it.
 data Node = Node
@@ -57,7 +54,7 @@ data Node = Node
   , nodeOnEntry     :: [Text]        -- ^ names of @<onentry><script>@ callbacks
   , nodeOnExit      :: [Text]        -- ^ names of @<onexit><script>@ callbacks
   }
-  deriving (Eq, Show, Lift)
+  deriving (Eq, Show)
 
 -- | An event a transition names, with the payload its constructor carries.
 -- The fields are Haskell type names, written after the event name in the
@@ -68,15 +65,15 @@ data Event = Event
   { eventName   :: Text
   , eventFields :: [Text] -- ^ type names, in order; empty for a bare event
   }
-  deriving (Eq, Show, Lift)
+  deriving (Eq, Show)
 
--- | A whole chart. This is what the quasiquoter lifts into the generated code.
+-- | A whole chart, as parsed from one quasiquote.
 data Chart = Chart
   { chartName   :: Maybe Text
   , chartRoot   :: NonEmpty Node -- ^ children of @<scxml>@; the first is entered
   , chartEvents :: [Event]       -- ^ every event a transition names, in document order
   }
-  deriving (Eq, Show, Lift)
+  deriving (Eq, Show)
 
 -- | Children of a state, the first being its initial child when it has one.
 nodeChildren :: Node -> [Node]
